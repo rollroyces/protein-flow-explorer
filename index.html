@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Protein Flow Explorer — Interactive 3D Biology Visualizer</title>
+  <meta
+    name="description"
+    content="Interactive web tool for visualizing protein 3D structures with guided tours, conformational-change playback, and exploration modes. Built for teaching and explaining molecular biology."
+  />
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://files.rcsb.org" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+</head>
+<body>
+  <!-- ============== HEADER ============== -->
+  <header class="app-header">
+    <div class="brand">
+      <div class="logo">🧬</div>
+      <div class="brand-text">
+        <h1>Protein Flow Explorer</h1>
+        <p class="tagline">Visualize &amp; explain 3D protein structures interactively</p>
+      </div>
+    </div>
+    <div class="header-meta">
+      <span class="badge"><span id="current-protein-name">—</span></span>
+      <span class="badge badge-state" id="current-state-badge">—</span>
+      <button class="btn btn-ghost" id="btn-about" title="About this tool">About</button>
+    </div>
+  </header>
+
+  <!-- ============== MAIN LAYOUT ============== -->
+  <main class="app-grid">
+    <!-- ----- LEFT: Protein Library ----- -->
+    <aside class="panel panel-left">
+      <div class="panel-header">
+        <h2>Protein Library</h2>
+        <p class="panel-sub">Select a structure to explore</p>
+      </div>
+      <div class="filter-chips" id="filter-chips">
+        <button class="chip active" data-filter="all">All</button>
+        <button class="chip" data-filter="allostery">Allostery</button>
+        <button class="chip" data-filter="binding">Binding</button>
+        <button class="chip" data-filter="drug-target">Drug target</button>
+        <button class="chip" data-filter="folding">Folding</button>
+        <button class="chip" data-filter="domains">Domains</button>
+      </div>
+      <div class="protein-list" id="protein-list"></div>
+      <div class="panel-footer">
+        <p class="muted">
+          Structures sourced from the
+          <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB Protein Data Bank</a>.
+        </p>
+      </div>
+    </aside>
+
+    <!-- ----- CENTER: 3D Viewer ----- -->
+    <section class="viewer-section">
+      <div id="viewer" class="viewer"></div>
+      <div id="viewer-overlay" class="viewer-overlay">
+        <div class="overlay-loading" id="overlay-loading">
+          <div class="spinner"></div>
+          <p id="loading-text">Loading structure…</p>
+        </div>
+        <div class="overlay-annotation" id="overlay-annotation" hidden>
+          <div class="annotation-title" id="ann-title"></div>
+          <div class="annotation-body" id="ann-body"></div>
+        </div>
+        <div class="overlay-step" id="overlay-step" hidden>
+          <div class="step-counter">
+            Step <span id="step-current">0</span> / <span id="step-total">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Viewer Toolbar -->
+      <div class="viewer-toolbar">
+        <div class="toolbar-group">
+          <button class="btn btn-icon" id="btn-reset-view" title="Reset camera">⟳ Reset</button>
+          <button class="btn btn-icon" id="btn-spin" title="Toggle auto-spin">↻ Spin</button>
+          <button class="btn btn-icon" id="btn-screenshot" title="Download PNG">⤓ Image</button>
+        </div>
+        <div class="toolbar-group toolbar-group-right">
+          <span class="muted small" id="fps-counter">— fps</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ----- RIGHT: Modes & Controls ----- -->
+    <aside class="panel panel-right">
+      <div class="tabs-header">
+        <button class="tab-btn active" data-tab="controls">Controls</button>
+        <button class="tab-btn" data-tab="tour">Guided Tour</button>
+        <button class="tab-btn" data-tab="trajectory">Trajectory</button>
+      </div>
+
+      <!-- ----- Controls Tab ----- -->
+      <div class="tab-panel active" data-tab-panel="controls">
+        <div class="control-section">
+          <h3>Representation</h3>
+          <div class="control-grid">
+            <label class="control-row">
+              <span>Style</span>
+              <select id="ctrl-style">
+                <option value="cartoon">Cartoon</option>
+                <option value="surface">Surface</option>
+                <option value="ball+stick">Ball &amp; Stick</option>
+                <option value="stick">Sticks</option>
+                <option value="spacefill">Spacefill</option>
+                <option value="ribbon">Ribbon</option>
+                <option value="line">Lines</option>
+              </select>
+            </label>
+            <label class="control-row">
+              <span>Color</span>
+              <select id="ctrl-color">
+                <option value="chain">By chain</option>
+                <option value="ss">Secondary structure</option>
+                <option value="spectrum">Spectrum (N→C)</option>
+                <option value="byElement">Element</option>
+                <option value="residue">By residue</option>
+                <option value="hydrophobicity">Hydrophobicity</option>
+                <option value="bFactor">B-factor</option>
+                <option value="byDomain">By domain</option>
+                <option value="uniform">Uniform</option>
+              </select>
+            </label>
+            <label class="control-row">
+              <span>Opacity</span>
+              <input type="range" id="ctrl-opacity" min="0.1" max="1" step="0.05" value="1" />
+            </label>
+            <label class="control-row">
+              <span>Background</span>
+              <select id="ctrl-bg">
+                <option value="white">White</option>
+                <option value="black">Black</option>
+                <option value="grey">Gradient grey</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="control-section">
+          <h3>Highlights</h3>
+          <div class="highlight-actions">
+            <button class="btn btn-secondary" id="btn-highlight-heme" hidden>Show heme / ligand</button>
+            <button class="btn btn-secondary" id="btn-highlight-active" hidden>Show active site</button>
+            <button class="btn btn-secondary" id="btn-highlight-interface" hidden>Show dimer interface</button>
+            <button class="btn btn-secondary" id="btn-highlight-all">Highlight all</button>
+            <button class="btn btn-ghost" id="btn-clear-highlights">Clear highlights</button>
+          </div>
+        </div>
+
+        <div class="control-section">
+          <h3>Description</h3>
+          <div class="protein-description" id="protein-description">
+            Select a protein from the left panel to begin.
+          </div>
+        </div>
+      </div>
+
+      <!-- ----- Tour Tab ----- -->
+      <div class="tab-panel" data-tab-panel="tour">
+        <div class="tour-empty" id="tour-empty">
+          <p>Select a protein to see its guided tour.</p>
+        </div>
+        <div class="tour-content" id="tour-content" hidden>
+          <h3 class="tour-title" id="tour-title">—</h3>
+          <div class="tour-steps" id="tour-steps"></div>
+          <div class="tour-controls">
+            <button class="btn btn-primary" id="btn-tour-play">▶ Play tour</button>
+            <button class="btn btn-secondary" id="btn-tour-next" disabled>Next →</button>
+            <button class="btn btn-ghost" id="btn-tour-stop">Stop</button>
+          </div>
+          <div class="tour-progress">
+            <div class="tour-progress-bar" id="tour-progress-bar"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ----- Trajectory Tab ----- -->
+      <div class="tab-panel" data-tab-panel="trajectory">
+        <div class="trajectory-empty" id="trajectory-empty">
+          <p>
+            Not every protein has a conformational-change trajectory. Try <b>Hemoglobin</b>,
+            <b>Adenylate Kinase</b>, <b>Calmodulin</b>, or <b>HIV-1 Protease</b>.
+          </p>
+        </div>
+        <div class="trajectory-content" id="trajectory-content" hidden>
+          <h3 class="trajectory-title" id="trajectory-title">—</h3>
+          <p class="trajectory-desc" id="trajectory-desc"></p>
+
+          <div class="trajectory-controls">
+            <div class="trajectory-state-label">
+              State A: <b id="traj-state-a">—</b>
+            </div>
+            <div class="trajectory-slider-row">
+              <input type="range" id="traj-slider" min="0" max="100" value="50" />
+              <div class="trajectory-percent"><span id="traj-percent">50</span>%</div>
+            </div>
+            <div class="trajectory-state-label">
+              State B: <b id="traj-state-b">—</b>
+            </div>
+          </div>
+
+          <div class="trajectory-actions">
+            <button class="btn btn-primary" id="btn-traj-play">▶ Play</button>
+            <button class="btn btn-secondary" id="btn-traj-pause" disabled>❚❚ Pause</button>
+            <button class="btn btn-secondary" id="btn-traj-reset" disabled>⟳ Reset</button>
+            <label class="speed-row">
+              <span>Speed</span>
+              <select id="traj-speed">
+                <option value="3000">Slow (3s)</option>
+                <option value="1500" selected>Normal (1.5s)</option>
+                <option value="800">Fast (0.8s)</option>
+              </select>
+            </label>
+          </div>
+
+          <p class="muted small">
+            Tip: drag the slider to scrub between the two states.
+          </p>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <!-- ============== ABOUT DIALOG ============== -->
+  <div class="modal-backdrop" id="about-modal" hidden>
+    <div class="modal">
+      <div class="modal-header">
+        <h2>About Protein Flow Explorer</h2>
+        <button class="modal-close" id="btn-close-about">×</button>
+      </div>
+      <div class="modal-body">
+        <p>
+          <b>Protein Flow Explorer</b> is a free, open teaching tool for visualising the
+          3D structures of proteins. It is designed to make molecular biology easy to
+          understand and easy to explain — in a classroom, a presentation, or while
+          reading a paper.
+        </p>
+        <h3>Three ways to explore</h3>
+        <ul>
+          <li>
+            <b>Controls.</b> Switch representations (cartoon, surface, sticks, …) and
+            colour schemes (chain, secondary structure, hydrophobicity, …) to inspect a
+            structure from any angle.
+          </li>
+          <li>
+            <b>Guided Tour.</b> A scripted, step-by-step walkthrough that highlights the
+            functional features of each curated protein. Great for teaching.
+          </li>
+          <li>
+            <b>Trajectory.</b> Play back a conformational change — hemoglobin T→R, kinase
+            open→closed, calmodulin extended→compact — by sliding between two PDB
+            states.
+          </li>
+        </ul>
+        <h3>Technology</h3>
+        <ul>
+          <li>Rendering: <a href="https://3dmol.org" target="_blank" rel="noopener">3Dmol.js</a></li>
+          <li>Data: RCSB PDB (open-access)</li>
+          <li>Frontend: Vanilla HTML + CSS + JS, no build step</li>
+        </ul>
+        <p class="muted small">
+          This is an educational tool, not for clinical use. Structure coordinates are
+          fetched live from RCSB; an internet connection is required the first time a
+          protein is opened.
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3Dmol.js core library -->
+  <script src="https://cdn.jsdelivr.net/npm/3dmol@2.4.2/build/3Dmol-min.js"></script>
+
+  <!-- App data -->
+  <script src="data/proteins.js"></script>
+
+  <!-- App code -->
+  <script src="app.js"></script>
+</body>
+</html>
