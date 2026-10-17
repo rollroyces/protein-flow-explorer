@@ -44,12 +44,35 @@
         <button class="chip" data-filter="drug-target">Drug target</button>
         <button class="chip" data-filter="folding">Folding</button>
         <button class="chip" data-filter="domains">Domains</button>
+        <button class="chip" data-filter="custom">Custom</button>
       </div>
+
+      <!-- Custom Loader -->
+      <div class="custom-loader">
+        <div class="custom-loader-row">
+          <input
+            type="text"
+            id="pdb-input"
+            placeholder="PDB ID (e.g. 4HHB)"
+            maxlength="4"
+            spellcheck="false"
+            autocomplete="off"
+          />
+          <button class="btn btn-primary btn-load" id="btn-load-pdb">Load</button>
+        </div>
+        <div class="drop-zone" id="drop-zone">
+          <span class="drop-zone-icon">⤓</span>
+          <span class="drop-zone-text">Drop <code>.pdb</code> / <code>.cif</code> file here</span>
+        </div>
+        <div class="custom-error" id="custom-error" hidden></div>
+      </div>
+
       <div class="protein-list" id="protein-list"></div>
       <div class="panel-footer">
         <p class="muted">
           Structures sourced from the
           <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB Protein Data Bank</a>.
+          Custom molecules stay in this session only.
         </p>
       </div>
     </aside>
@@ -256,6 +279,15 @@
             states.
           </li>
         </ul>
+        <h3>Load any molecule</h3>
+        <p>
+          Use the <b>PDB ID</b> input to fetch any structure from the open-access
+          <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB Protein Data Bank</a>,
+          or drop a <code>.pdb</code> / <code>.cif</code> file onto the drop zone to
+          load AlphaFold models, your own simulations, or any local structure. Custom
+          molecules stay in the library for the session and can be removed with the
+          × button on each card.
+        </p>
         <h3>Technology</h3>
         <ul>
           <li>Rendering: <a href="https://3dmol.org" target="_blank" rel="noopener">3Dmol.js</a></li>

@@ -6,6 +6,7 @@
  *  - Guided tours with annotations + camera moves
  *  - Conformational-change playback (slider between two PDB states)
  *  - Representation & color controls
+ *  - Custom molecules (PDB-ID input + .pdb/.cif drag-and-drop)
  * =================================================================== */
 
 (function () {
@@ -16,7 +17,7 @@
     viewer: null,
     currentProtein: null,
     currentPdbIndex: 0,
-    models: [],          // array of loaded 3Dmol models
+    models: [],
     currentStyle: "cartoon",
     currentColor: "chain",
     currentOpacity: 1,
@@ -32,6 +33,8 @@
     trajectoryValue: 50,
     trajectoryDirection: 1,
     activeHighlights: [],
+    currentFilter: "all",
+    customCounter: 0,
   };
 
   // ====== DOM REFS ======
@@ -68,6 +71,12 @@
     btnClearHighlights: $("btn-clear-highlights"),
 
     proteinDescription: $("protein-description"),
+
+    // Custom loader
+    pdbInput: $("pdb-input"),
+    btnLoadPdb: $("btn-load-pdb"),
+    dropZone: $("drop-zone"),
+    customError: $("custom-error"),
 
     // Tabs
     tabBtns: document.querySelectorAll(".tab-btn"),
@@ -111,7 +120,6 @@
       backgroundColor: "white",
     });
 
-    // FPS counter
     const tick = () => {
       state.fpsFrames++;
       const now = performance.now();
@@ -124,7 +132,6 @@
     };
     requestAnimationFrame(tick);
 
-    // Resize observer
     if (window.ResizeObserver) {
       const ro = new ResizeObserver(() => state.viewer.resize());
       ro.observe(dom.viewer);
@@ -137,6 +144,7 @@
   //  PROTEIN LIBRARY
   // ===================================================================
   function renderProteinList(filter = "all") {
+    state.currentFilter = filter;
     const list = filter === "all"
       ? PROTEINS
       : PROTEINS.filter((p) => p.category === filter);
@@ -145,6 +153,7 @@
     list.forEach((p) => {
       const card = document.createElement("div");
       card.className = "protein-card";
+      if (p.isCustom) card.classList.add("protein-card-custom");
       card.dataset.id = p.id;
       card.style.borderLeftColor = p.color;
       if (state.currentProtein && state.currentProtein.id === p.id) {
@@ -152,10 +161,15 @@
       }
 
       const pdbTags = p.pdbIds
-        .map((id, i) => `<span class="pdb-tag">${id}${p.stateLabels.length > 1 ? "·" + p.stateLabels[i].split(" ")[0] : ""}</span>`)
+        .map((id, i) => `<span class="pdb-tag">${escapeHtml(String(id))}${p.stateLabels.length > 1 ? "·" + escapeHtml(p.stateLabels[i].split(" ")[0]) : ""}</span>`)
         .join("");
 
+      const removeBtn = p.isCustom
+        ? `<button class="remove-btn" data-remove="${escapeHtml(p.id)}" title="Remove">×</button>`
+        : "";
+
       card.innerHTML = `
+        ${removeBtn}
         <div class="protein-card-name">
           <span style="color: ${p.color}">●</span> ${escapeHtml(p.name)}
         </div>
@@ -165,7 +179,17 @@
           <span class="category-tag">${categoryLabel(p.category)}</span>
         </div>
       `;
-      card.addEventListener("click", () => loadProtein(p.id));
+      card.addEventListener("click", (e) => {
+        if (e.target.closest(".remove-btn")) return;
+        loadProtein(p.id);
+      });
+      const removeEl = card.querySelector(".remove-btn");
+      if (removeEl) {
+        removeEl.addEventListener("click", (e) => {
+          e.stopPropagation();
+          removeCustomMolecule(p.id);
+        });
+      }
       dom.proteinList.appendChild(card);
     });
   }
@@ -177,6 +201,7 @@
       "drug-target": "drug target",
       folding: "folding",
       domains: "domains",
+      custom: "custom",
     }[c] || c;
   }
 
@@ -190,13 +215,185 @@
     })[c]);
   }
 
-  // Filter chips
   dom.filterChips.addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
     if (!btn) return;
     document.querySelectorAll(".chip").forEach((c) => c.classList.remove("active"));
     btn.classList.add("active");
     renderProteinList(btn.dataset.filter);
+  });
+
+  // ===================================================================
+  //  CUSTOM MOLECULES (PDB-ID input + file drop)
+  // ===================================================================
+  function showCustomError(msg) {
+    dom.customError.textContent = msg;
+    dom.customError.hidden = false;
+    clearTimeout(showCustomError._t);
+    showCustomError._t = setTimeout(() => {
+      dom.customError.hidden = true;
+    }, 6000);
+  }
+
+  function extractPdbTitle(pdbText) {
+    if (!pdbText) return null;
+    const m = pdbText.match(/^TITLE\s+(.+?)$/m);
+    return m ? m[1].trim().replace(/\s+/g, " ") : null;
+  }
+
+  function makeCustomProtein({ id, name, summary, description, rawData, format, source }) {
+    const title = extractPdbTitle(rawData);
+    if (title && (name === undefined || name.startsWith("PDB ") || name === "Custom Molecule")) {
+      name = title.length > 40 ? title.slice(0, 40) + "…" : title;
+    }
+    return {
+      id,
+      name: name || "Custom Molecule",
+      pdbIds: [id.replace(/^custom-/, "")],
+      stateLabels: [format === "cif" ? "mmCIF" : "PDB"],
+      summary: summary || (source === "pdb-id" ? `Loaded from PDB ID ${id.replace(/^custom-/, "")}` : "Custom-loaded molecule"),
+      description: description || title || `Custom molecule loaded from ${source}`,
+      category: "custom",
+      color: "#a78bfa",
+      isCustom: true,
+      rawData,
+      format: format || "pdb",
+    };
+  }
+
+  async function loadCustomByPdbId(pdbIdRaw) {
+    const pdbId = String(pdbIdRaw || "").trim().toUpperCase();
+    if (!/^[0-9][A-Z0-9]{3}$/.test(pdbId)) {
+      showCustomError(`Invalid PDB ID "${pdbIdRaw}". Use 4 characters, e.g. 4HHB.`);
+      return;
+    }
+    const id = `custom-${pdbId}`;
+    if (PROTEINS.some((p) => p.id === id)) {
+      hideLoading();
+      loadProtein(id);
+      dom.pdbInput.value = "";
+      return;
+    }
+
+    showLoading(`Fetching PDB ${pdbId}…`);
+    try {
+      const response = await fetch(`https://files.rcsb.org/download/${pdbId}.pdb`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.text();
+      if (!data || data.length < 50) throw new Error("Empty or invalid response");
+      const protein = makeCustomProtein({
+        id,
+        rawData: data,
+        format: "pdb",
+        source: "pdb-id",
+      });
+      PROTEINS.push(protein);
+      dom.customError.hidden = true;
+      dom.pdbInput.value = "";
+      hideLoading();
+      renderProteinList(state.currentFilter);
+      loadProtein(id);
+    } catch (err) {
+      hideLoading();
+      showCustomError(`Could not load ${pdbId}: ${err.message}`);
+    }
+  }
+
+  async function loadCustomFromText(text, filename) {
+    const fname = filename || "pasted";
+    const ext = (fname.split(".").pop() || "").toLowerCase();
+    let format = "pdb";
+    if (ext === "cif" || /^data_/m.test(text.slice(0, 500))) format = "cif";
+    if (!text || text.length < 30) {
+      showCustomError("File appears empty or too small to be a structure.");
+      return;
+    }
+    state.customCounter++;
+    const id = `custom-file-${state.customCounter}`;
+    const baseName = fname.replace(/\.(pdb|cif)$/i, "").replace(/[^\w.-]+/g, "_");
+    const protein = makeCustomProtein({
+      id,
+      name: baseName || `Molecule ${state.customCounter}`,
+      summary: `Loaded from file: ${fname}`,
+      description: `Custom molecule from local file (${format.toUpperCase()})`,
+      rawData: text,
+      format,
+      source: "file",
+    });
+    PROTEINS.push(protein);
+    dom.customError.hidden = true;
+    renderProteinList(state.currentFilter);
+    loadProtein(id);
+  }
+
+  async function loadCustomFromFile(file) {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      await loadCustomFromText(text, file.name);
+    } catch (err) {
+      showCustomError(`Could not read file: ${err.message}`);
+    }
+  }
+
+  function removeCustomMolecule(id) {
+    const idx = PROTEINS.findIndex((p) => p.id === id);
+    if (idx === -1) return;
+    PROTEINS.splice(idx, 1);
+    if (state.currentProtein && state.currentProtein.id === id) {
+      const fallback = PROTEINS.find((p) => !p.isCustom);
+      if (fallback) loadProtein(fallback.id);
+    }
+    renderProteinList(state.currentFilter);
+  }
+
+  dom.btnLoadPdb.addEventListener("click", () => {
+    loadCustomByPdbId(dom.pdbInput.value);
+  });
+  dom.pdbInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      loadCustomByPdbId(dom.pdbInput.value);
+    }
+  });
+  dom.pdbInput.addEventListener("input", (e) => {
+    e.target.value = e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, "");
+  });
+
+  ["dragenter", "dragover"].forEach((ev) => {
+    dom.dropZone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dom.dropZone.classList.add("dragover");
+    });
+  });
+  ["dragleave", "dragend"].forEach((ev) => {
+    dom.dropZone.addEventListener(ev, (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dom.dropZone.classList.remove("dragover");
+    });
+  });
+  dom.dropZone.addEventListener("drop", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dom.dropZone.classList.remove("dragover");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length > 0) {
+      loadCustomFromFile(files[0]);
+    }
+  });
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", (e) => e.preventDefault());
+
+  dom.dropZone.addEventListener("click", () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".pdb,.cif,.ent,.txt";
+    input.addEventListener("change", () => {
+      if (input.files && input.files[0]) loadCustomFromFile(input.files[0]);
+    });
+    input.click();
   });
 
   // ===================================================================
@@ -210,41 +407,37 @@
     state.currentPdbIndex = 0;
     state.activeHighlights = [];
 
-    // Update header + active card
     dom.currentProteinName.textContent = protein.name;
     updateStateBadge(0);
     renderProteinList(document.querySelector(".chip.active").dataset.filter);
 
-    // Show description
     dom.proteinDescription.textContent = protein.description;
 
-    // Update right-panel availability
     updateTourAvailability();
     updateTrajectoryAvailability();
     updateHighlightButtons();
 
-    // Show loading
     showLoading("Loading " + protein.name + "…");
 
-    // Reset viewer
     state.viewer.removeAllModels();
     state.viewer.removeAllShapes();
     state.viewer.removeAllLabels();
     state.viewer.removeAllSurfaces();
 
     try {
-      // Load all PDB IDs in parallel via fetch
       const loadPromises = protein.pdbIds.map(async (pdbId, idx) => {
-        const url = `https://files.rcsb.org/download/${pdbId}.pdb`;
-        const response = await fetch(url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status} fetching ${pdbId}`);
+        let data;
+        if (protein.isCustom && protein.rawData && idx === 0) {
+          data = protein.rawData;
+        } else {
+          const url = `https://files.rcsb.org/download/${pdbId}.pdb`;
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${pdbId}`);
+          data = await response.text();
+          if (!data) throw new Error(`Empty response for ${pdbId}`);
         }
-        const data = await response.text();
-        if (!data) {
-          throw new Error(`Empty response for ${pdbId}`);
-        }
-        const model = state.viewer.addModel(data, "pdb");
+        const format = protein.isCustom && idx === 0 ? (protein.format || "pdb") : "pdb";
+        const model = state.viewer.addModel(data, format);
         model.modelIndex = idx;
         model.pdbId = pdbId;
         return model;
@@ -253,24 +446,18 @@
       const models = await Promise.all(loadPromises);
       state.models = models;
 
-      // Apply initial style to all
       applyAllStyles();
-
-      // Zoom to fit
       state.viewer.zoomTo();
       state.viewer.render();
 
-      // Auto-spin disabled initially for educational purposes
       state.spinning = false;
       dom.btnSpin.textContent = "↻ Spin";
 
       hideLoading();
 
-      // For trajectory proteins, set up the dual-model rendering
       if (TRAJECTORIES[protein.id]) {
         setupTrajectoryInitial();
       } else {
-        // For non-trajectory, just show first model
         setModelVisibility(0);
       }
     } catch (err) {
@@ -301,9 +488,7 @@
   //  STYLING
   // ===================================================================
   function applyAllStyles() {
-    state.models.forEach((m, idx) => {
-      applyStyleToModel(m, idx);
-    });
+    state.models.forEach((m, idx) => applyStyleToModel(m, idx));
   }
 
   function applyStyleToModel(model, idx) {
@@ -311,21 +496,14 @@
     const style = getStyleSpec(state.currentStyle, state.currentColor, state.currentOpacity);
     state.viewer.setStyle(sel, style);
 
-    // Heme / ligand highlight overlay
     const protein = state.currentProtein;
     if (protein && protein.highlights && protein.highlights.ligand) {
-      const ligandSel = {
-        model: idx,
-        resn: protein.highlights.ligand.resn,
-      };
-      state.viewer.setStyle(ligandSel, {
-        stick: { color: "magenta", radius: 0.18 },
-      });
+      const ligandSel = { model: idx, resn: protein.highlights.ligand.resn };
+      state.viewer.setStyle(ligandSel, { stick: { color: "magenta", radius: 0.18 } });
     }
   }
 
   function getStyleSpec(styleName, colorName, opacity) {
-    // Build a 3Dmol.js style spec
     const base = { opacity };
     switch (styleName) {
       case "cartoon":
@@ -351,21 +529,17 @@
     state.models.forEach((m, i) => {
       const visible = i === idx || !TRAJECTORIES[state.currentProtein?.id];
       m.setStyle({}, visible ? getStyleSpec(state.currentStyle, state.currentColor, state.currentOpacity) : {});
-      // Show all sticks on the active model
-      if (visible && i === idx) {
-        applyStyleToModel(m, i);
-      }
+      if (visible && i === idx) applyStyleToModel(m, i);
     });
     state.viewer.render();
   }
 
   // ===================================================================
-  //  CONTROLS — Style/Color/Opacity
+  //  CONTROLS
   // ===================================================================
   dom.ctrlStyle.addEventListener("change", (e) => {
     state.currentStyle = e.target.value;
     applyAllStyles();
-    // Re-apply trajectory blending
     if (state.currentProtein && TRAJECTORIES[state.currentProtein.id]) {
       updateTrajectoryBlend(state.trajectoryValue);
     } else {
@@ -413,11 +587,10 @@
     const h = protein.highlights || {};
     dom.btnHighlightHeme.hidden = !h.ligand;
     dom.btnHighlightActive.hidden = !h.residues;
-    dom.btnHighlightInterface.hidden = protein.pdbIds[0]?.startsWith("1HV") ? false : !protein.pdbIds[0]; // demo for HIV
-    if (state.currentProtein.id !== "hiv-protease") {
-      dom.btnHighlightInterface.hidden = true;
-    } else {
+    if (state.currentProtein.id === "hiv-protease") {
       dom.btnHighlightInterface.hidden = false;
+    } else {
+      dom.btnHighlightInterface.hidden = true;
     }
   }
 
@@ -443,7 +616,6 @@
         sphere: { color: "yellow", scale: 0.4 },
       });
     });
-    // Zoom to residues
     state.viewer.zoomTo({ resi: h.residues.map((r) => r.resi) });
     state.viewer.render();
   });
@@ -509,7 +681,6 @@
       const tab = btn.dataset.tab;
       dom.tabBtns.forEach((b) => b.classList.toggle("active", b === btn));
       dom.tabPanels.forEach((p) => p.classList.toggle("active", p.dataset.tabPanel === tab));
-      // Stop any active mode when switching
       if (tab !== "tour") stopTour();
       if (tab !== "trajectory") stopTrajectory();
     });
@@ -560,7 +731,6 @@
 
   dom.btnTourNext.addEventListener("click", () => {
     if (!state.tourRunning) {
-      // If not running, jump to next step manually
       const tours = TOURS[state.currentProtein.id];
       if (!tours) return;
       const nextIdx = state.tourStepIndex + 1;
@@ -605,30 +775,19 @@
     if (!tours) return;
     const tour = tours[0];
     const step = tour.steps[idx];
-    if (!step) {
-      stopTour();
-      return;
-    }
+    if (!step) { stopTour(); return; }
 
     state.tourStepIndex = idx;
     updateTourUI();
     showStepOverlay(idx, tour.steps.length);
-
-    // Apply the step's action to the viewer
     applyTourAction(step);
-
-    // Show annotation
     showAnnotation(step.title, step.body);
 
     if (state.tourRunning) {
-      // Schedule next step
       state.tourTimeout = setTimeout(() => {
         const nextIdx = idx + 1;
-        if (nextIdx < tour.steps.length) {
-          runTourStep(nextIdx);
-        } else {
-          stopTour();
-        }
+        if (nextIdx < tour.steps.length) runTourStep(nextIdx);
+        else stopTour();
       }, step.duration);
     }
   }
@@ -638,13 +797,11 @@
     if (!tours) return;
     const total = tours[0].steps.length;
     const current = state.tourStepIndex;
-
     document.querySelectorAll(".tour-step").forEach((el) => {
       const i = parseInt(el.dataset.index, 10);
       el.classList.toggle("active", i === current && state.tourRunning);
       el.classList.toggle("completed", i < current);
     });
-
     const pct = total > 0 ? ((current + 1) / total) * 100 : 0;
     dom.tourProgressBar.style.width = `${pct}%`;
   }
@@ -669,23 +826,17 @@
     dom.stepOverlay.hidden = true;
   }
 
-  // ===================================================================
-  //  TOUR ACTIONS
-  // ===================================================================
   function applyTourAction(step) {
     const a = step.action || {};
     clearAllHighlights();
     state.viewer.removeAllShapes();
 
-    // Switch PDB index if specified
     if (typeof a.pdbIndex === "number" && state.models[a.pdbIndex]) {
       state.currentPdbIndex = a.pdbIndex;
       updateStateBadge(a.pdbIndex);
-      // Re-apply styles with new active model
       applyAllStyles();
     }
 
-    // Apply base style
     if (a.style && a.colorScheme) {
       state.currentStyle = a.style;
       state.currentColor = a.colorScheme;
@@ -694,7 +845,6 @@
       applyAllStyles();
     }
 
-    // Surface
     if (a.surface) {
       state.viewer.addSurface(
         $3Dmol.SurfaceType.VDW,
@@ -703,7 +853,6 @@
       );
     }
 
-    // Sticks
     if (a.showSticks) {
       const target = a.showSticks;
       const sel = {};
@@ -716,18 +865,14 @@
       });
     }
 
-    // Spheres
     if (a.showSpheres) {
       const target = a.showSpheres;
       const sel = {};
       if (target.resi) sel.resi = target.resi;
       if (target.resn) sel.resn = target.resn;
-      state.viewer.addStyle(sel, {
-        sphere: { scale: 0.5, color: "magenta" },
-      });
+      state.viewer.addStyle(sel, { sphere: { scale: 0.5, color: "magenta" } });
     }
 
-    // Highlight
     if (a.highlight) {
       const sel = {};
       if (a.highlight.resi) sel.resi = a.highlight.resi;
@@ -738,25 +883,17 @@
       });
     }
 
-    // Focus on heme
     if (a.focusHeme) {
       const hemeSel = { resn: ["HEM", "HEME", "IHV"] };
-      try {
-        state.viewer.zoomTo(hemeSel, 0, false);
-      } catch (e) {
-        state.viewer.zoomTo();
-      }
+      try { state.viewer.zoomTo(hemeSel, 0, false); }
+      catch (e) { state.viewer.zoomTo(); }
     } else if (a.zoomChain) {
-      try {
-        state.viewer.zoomTo({ chain: a.zoomChain });
-      } catch (e) {
-        state.viewer.zoomTo();
-      }
+      try { state.viewer.zoomTo({ chain: a.zoomChain }); }
+      catch (e) { state.viewer.zoomTo(); }
     } else {
       state.viewer.zoomTo();
     }
 
-    // Spin
     if (a.spin) {
       state.spinning = true;
       dom.btnSpin.textContent = "⏸ Pause";
@@ -795,7 +932,6 @@
   }
 
   function setupTrajectoryInitial() {
-    // Both models visible; slider controls opacity of B over A
     updateTrajectoryBlend(50);
   }
 
@@ -810,7 +946,6 @@
     const opacityA = 1 - t;
     const opacityB = t;
 
-    // Reset styles for both models
     state.viewer.setStyle({ model: idxA }, {
       cartoon: { color: state.currentColor, opacity: opacityA },
     });
@@ -818,7 +953,6 @@
       cartoon: { color: state.currentColor, opacity: opacityB },
     });
 
-    // Re-apply ligand styles
     const protein = state.currentProtein;
     if (protein.highlights && protein.highlights.ligand) {
       const ligandResn = protein.highlights.ligand.resn;
@@ -872,17 +1006,12 @@
       const progress = elapsed / speed;
       const v = startValue + (100 - startValue) * progress * state.trajectoryDirection;
       if (state.trajectoryDirection === 1 && v >= 100) {
-        // Switch to reverse
         state.trajectoryDirection = -1;
-        requestAnimationFrame(() => {
-          startValueLoop(100);
-        });
+        requestAnimationFrame(() => startValueLoop(100));
         return;
       } else if (state.trajectoryDirection === -1 && v <= 0) {
         state.trajectoryDirection = 1;
-        requestAnimationFrame(() => {
-          startValueLoop(0);
-        });
+        requestAnimationFrame(() => startValueLoop(0));
         return;
       }
       const clamped = Math.max(0, Math.min(100, v));
@@ -940,12 +1069,8 @@
   // ===================================================================
   //  MODAL
   // ===================================================================
-  dom.btnAbout.addEventListener("click", () => {
-    dom.aboutModal.hidden = false;
-  });
-  dom.btnCloseAbout.addEventListener("click", () => {
-    dom.aboutModal.hidden = true;
-  });
+  dom.btnAbout.addEventListener("click", () => { dom.aboutModal.hidden = false; });
+  dom.btnCloseAbout.addEventListener("click", () => { dom.aboutModal.hidden = true; });
   dom.aboutModal.addEventListener("click", (e) => {
     if (e.target === dom.aboutModal) dom.aboutModal.hidden = true;
   });
@@ -956,13 +1081,9 @@
   function init() {
     initViewer();
     renderProteinList();
-    // Auto-load first protein
-    if (PROTEINS.length > 0) {
-      loadProtein(PROTEINS[0].id);
-    }
+    if (PROTEINS.length > 0) loadProtein(PROTEINS[0].id);
   }
 
-  // Wait for DOM + 3Dmol
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
