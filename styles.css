@@ -189,6 +189,37 @@ a:hover { text-decoration: underline; }
   margin-bottom: 12px;
 }
 
+.custom-loader-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 8px;
+  background: var(--bg-2);
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.loader-tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-2);
+  padding: 5px 6px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: var(--transition);
+  font-family: inherit;
+}
+
+.loader-tab:hover { color: var(--text-0); }
+
+.loader-tab.active {
+  background: var(--bg-3);
+  color: var(--accent);
+}
+
 .custom-loader-row {
   display: flex;
   gap: 6px;
@@ -279,6 +310,48 @@ a:hover { text-decoration: underline; }
   line-height: 1.4;
 }
 
+/* ============== COMPARE CONTROLS ============== */
+.compare-controls {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.btn-clear-compare {
+  margin-top: 6px;
+  width: 100%;
+}
+
+/* ============== PROTEIN LIST ============== */
+.protein-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px 12px;
+}
+
+.protein-card {
+  padding: 12px;
+  margin-bottom: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: var(--transition);
+  border-left: 3px solid transparent;
+  position: relative;
+}
+
+.protein-card:hover {
+  background: var(--bg-3);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.protein-card.active {
+  border-color: var(--accent);
+  background: var(--bg-3);
+}
+
 .protein-card-custom {
   position: relative;
 }
@@ -318,36 +391,6 @@ a:hover { text-decoration: underline; }
   content: "★";
   margin-right: 2px;
   color: var(--accent-warm);
-}
-
-/* ============== PROTEIN LIST ============== */
-.protein-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0 12px 12px;
-}
-
-.protein-card {
-  padding: 12px;
-  margin-bottom: 8px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  cursor: pointer;
-  transition: var(--transition);
-  border-left: 3px solid transparent;
-  position: relative;
-}
-
-.protein-card:hover {
-  background: var(--bg-3);
-  border-color: var(--border-strong);
-  transform: translateY(-1px);
-}
-
-.protein-card.active {
-  border-color: var(--accent);
-  background: var(--bg-3);
 }
 
 .protein-card-name {
@@ -401,6 +444,7 @@ a:hover { text-decoration: underline; }
   flex: 1;
   position: relative;
   background: white;
+  min-height: 320px;
 }
 
 .viewer canvas {
@@ -560,6 +604,31 @@ a:hover { text-decoration: underline; }
 
 .step-counter {
   color: white;
+}
+
+/* ============== OVERLAY PICK HINT ============== */
+.overlay-pick-hint {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 183, 77, 0.95);
+  color: #1a1a1a;
+  padding: 8px 14px;
+  border-radius: 18px;
+  font-size: 12.5px;
+  font-weight: 500;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  z-index: 10;
+}
+
+.btn-tiny {
+  padding: 3px 8px;
+  font-size: 10.5px;
 }
 
 /* ============== RIGHT PANEL TABS ============== */
@@ -845,6 +914,244 @@ a:hover { text-decoration: underline; }
   font-family: inherit;
 }
 
+/* ============== SEQUENCE PANEL ============== */
+.sequence-panel {
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  flex-shrink: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.sequence-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.sequence-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.sequence-chains {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.sequence-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+
+.sequence-chain-label {
+  color: var(--text-2);
+  font-size: 10.5px;
+  min-width: 22px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.sequence-residue {
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  text-align: center;
+  border-radius: 2px;
+  cursor: pointer;
+  color: rgba(0, 0, 0, 0.85);
+  font-weight: 600;
+  font-size: 10px;
+  line-height: 16px;
+  transition: transform 0.1s;
+  position: relative;
+}
+
+.sequence-residue:hover {
+  transform: scale(1.4);
+  z-index: 2;
+  outline: 1.5px solid var(--accent);
+}
+
+.sequence-residue.active {
+  outline: 2px solid var(--accent-warm);
+  z-index: 3;
+}
+
+.sequence-residue.ss-helix {
+  border-radius: 6px;
+}
+.sequence-residue.ss-sheet {
+  transform: skewX(-12deg);
+}
+.sequence-residue.ss-coil {
+  border-radius: 2px;
+}
+
+.sequence-secondary {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: var(--bg-2);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.sequence-secondary-bar {
+  display: inline-block;
+  height: 12px;
+  margin: 0 1px;
+  vertical-align: middle;
+  border-radius: 1px;
+}
+
+.sequence-secondary-bar.helix {
+  height: 14px;
+  border-radius: 7px;
+}
+.sequence-secondary-bar.sheet {
+  height: 10px;
+  transform: skewX(-12deg);
+}
+
+/* ============== MEASUREMENT TABLE ============== */
+.measurement-table {
+  margin-top: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.measurement-table-empty {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.measurement-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+
+.measurement-row:last-child {
+  border-bottom: none;
+}
+
+.measurement-type {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.measurement-value {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-weight: 600;
+  color: var(--text-0);
+  text-align: right;
+}
+
+.measurement-atoms {
+  grid-column: 1 / -1;
+  font-size: 10.5px;
+  color: var(--text-2);
+  margin-top: 2px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.measurement-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* ============== COMPARE / RMSD ============== */
+.rmsd-summary {
+  margin-top: 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.rmsd-summary-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+}
+
+.rmsd-summary-row b {
+  color: var(--accent);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.rmsd-bar {
+  height: 6px;
+  background: linear-gradient(to right, #10b981 0%, #fbbf24 50%, #ef4444 100%);
+  border-radius: 3px;
+  margin: 6px 0;
+  position: relative;
+}
+
+.rmsd-bar-marker {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--bg-0);
+}
+
+/* ============== TOAST ============== */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-1);
+  border: 1px solid var(--border-strong);
+  color: var(--text-0);
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  z-index: 200;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  animation: slideUpFade 0.25s ease;
+}
+
+@keyframes slideUpFade {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+.toast.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.toast.success {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+}
+
 /* ============== MODAL ============== */
 [hidden] {
   display: none !important;
@@ -958,11 +1265,12 @@ a:hover { text-decoration: underline; }
 @media (max-width: 900px) {
   .app-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: auto 50vh auto;
+    grid-template-rows: auto 60vh auto;
   }
   .panel-left, .panel-right {
     border: none;
     border-bottom: 1px solid var(--border);
     max-height: 280px;
   }
+  .sequence-panel { max-height: 120px; }
 }

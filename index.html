@@ -6,11 +6,13 @@
   <title>Protein Flow Explorer — Interactive 3D Biology Visualizer</title>
   <meta
     name="description"
-    content="Interactive web tool for visualizing protein 3D structures with guided tours, conformational-change playback, and exploration modes. Built for teaching and explaining molecular biology."
+    content="Interactive web tool for visualising protein 3D structures with guided tours, conformational-change playback, measurement tools, sequence navigation, UniProt lookup, side-by-side comparison, and shareable views. Built for teaching and research."
   />
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://files.rcsb.org" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+  <link rel="preconnect" href="https://rest.uniprot.org" />
+  <link rel="preconnect" href="https://alphafold.ebi.ac.uk" />
 </head>
 <body>
   <!-- ============== HEADER ============== -->
@@ -19,12 +21,13 @@
       <div class="logo">🧬</div>
       <div class="brand-text">
         <h1>Protein Flow Explorer</h1>
-        <p class="tagline">Visualize &amp; explain 3D protein structures interactively</p>
+        <p class="tagline">Visualize, measure &amp; explain 3D protein structures</p>
       </div>
     </div>
     <div class="header-meta">
       <span class="badge"><span id="current-protein-name">—</span></span>
       <span class="badge badge-state" id="current-state-badge">—</span>
+      <button class="btn btn-ghost" id="btn-share" title="Copy share link">🔗 Share</button>
       <button class="btn btn-ghost" id="btn-about" title="About this tool">About</button>
     </div>
   </header>
@@ -49,35 +52,71 @@
 
       <!-- Custom Loader -->
       <div class="custom-loader">
-        <div class="custom-loader-row">
-          <input
-            type="text"
-            id="pdb-input"
-            placeholder="PDB ID (e.g. 4HHB)"
-            maxlength="4"
-            spellcheck="false"
-            autocomplete="off"
-          />
-          <button class="btn btn-primary btn-load" id="btn-load-pdb">Load</button>
+        <div class="custom-loader-tabs" id="loader-tabs">
+          <button class="loader-tab active" data-loader="pdb">PDB ID</button>
+          <button class="loader-tab" data-loader="gene">Gene / UniProt</button>
+        </div>
+        <div class="custom-loader-pane" data-loader-pane="pdb">
+          <div class="custom-loader-row">
+            <input
+              type="text"
+              id="pdb-input"
+              placeholder="PDB ID (e.g. 4HHB)"
+              maxlength="4"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button class="btn btn-primary btn-load" id="btn-load-pdb">Load</button>
+          </div>
+        </div>
+        <div class="custom-loader-pane" data-loader-pane="gene" hidden>
+          <div class="custom-loader-row">
+            <input
+              type="text"
+              id="gene-input"
+              placeholder="Gene (TP53) or UniProt (P04637)"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button class="btn btn-primary btn-load" id="btn-load-gene">Look up</button>
+          </div>
+          <p class="muted small" style="margin: 4px 0 0">Falls back to AlphaFold if no PDB exists.</p>
         </div>
         <div class="drop-zone" id="drop-zone">
           <span class="drop-zone-icon">⤓</span>
-          <span class="drop-zone-text">Drop <code>.pdb</code> / <code>.cif</code> file here</span>
+          <span class="drop-zone-text">Or drop <code>.pdb</code> / <code>.cif</code> file here</span>
         </div>
         <div class="custom-error" id="custom-error" hidden></div>
+        <div class="compare-controls" id="compare-controls" hidden>
+          <p class="muted small">Second structure for comparison</p>
+          <div class="custom-loader-row">
+            <input
+              type="text"
+              id="compare-input"
+              placeholder="PDB ID for structure B"
+              maxlength="4"
+              spellcheck="false"
+              autocomplete="off"
+            />
+            <button class="btn btn-secondary btn-load" id="btn-load-compare">Load B</button>
+          </div>
+          <button class="btn btn-ghost btn-clear-compare" id="btn-clear-compare">Clear comparison</button>
+        </div>
       </div>
 
       <div class="protein-list" id="protein-list"></div>
       <div class="panel-footer">
         <p class="muted">
-          Structures sourced from the
-          <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB Protein Data Bank</a>.
+          Structures from the
+          <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB PDB</a>,
+          <a href="https://alphafold.ebi.ac.uk" target="_blank" rel="noopener">AlphaFold</a>
+          and <a href="https://www.uniprot.org" target="_blank" rel="noopener">UniProt</a>.
           Custom molecules stay in this session only.
         </p>
       </div>
     </aside>
 
-    <!-- ----- CENTER: 3D Viewer ----- -->
+    <!-- ----- CENTER: 3D Viewer + Sequence ----- -->
     <section class="viewer-section">
       <div id="viewer" class="viewer"></div>
       <div id="viewer-overlay" class="viewer-overlay">
@@ -94,6 +133,10 @@
             Step <span id="step-current">0</span> / <span id="step-total">0</span>
           </div>
         </div>
+        <div class="overlay-pick-hint" id="pick-hint" hidden>
+          <span id="pick-hint-text">Click an atom to pick</span>
+          <button class="btn btn-ghost btn-tiny" id="btn-cancel-pick">Cancel</button>
+        </div>
       </div>
 
       <!-- Viewer Toolbar -->
@@ -107,13 +150,25 @@
           <span class="muted small" id="fps-counter">— fps</span>
         </div>
       </div>
+
+      <!-- Sequence panel (below viewer) -->
+      <div class="sequence-panel" id="sequence-panel">
+        <div class="sequence-header">
+          <span class="sequence-title">Sequence</span>
+          <span class="muted small" id="sequence-info">—</span>
+          <button class="btn btn-tiny btn-ghost" id="btn-toggle-secondary">Show SS</button>
+        </div>
+        <div class="sequence-chains" id="sequence-chains"></div>
+        <div class="sequence-secondary" id="sequence-secondary" hidden></div>
+      </div>
     </section>
 
     <!-- ----- RIGHT: Modes & Controls ----- -->
     <aside class="panel panel-right">
       <div class="tabs-header">
         <button class="tab-btn active" data-tab="controls">Controls</button>
-        <button class="tab-btn" data-tab="tour">Guided Tour</button>
+        <button class="tab-btn" data-tab="tools">Tools</button>
+        <button class="tab-btn" data-tab="tour">Tour</button>
         <button class="tab-btn" data-tab="trajectory">Trajectory</button>
       </div>
 
@@ -179,6 +234,33 @@
           <div class="protein-description" id="protein-description">
             Select a protein from the left panel to begin.
           </div>
+        </div>
+      </div>
+
+      <!-- ----- Tools Tab ----- -->
+      <div class="tab-panel" data-tab-panel="tools">
+        <div class="control-section">
+          <h3>Measurement</h3>
+          <p class="muted small">Click atoms to measure distances, angles and dihedrals.</p>
+          <div class="highlight-actions">
+            <button class="btn btn-primary" id="btn-pick-atom">📍 Pick atoms</button>
+            <button class="btn btn-ghost" id="btn-clear-measurements">Clear all</button>
+          </div>
+          <div class="measurement-table" id="measurement-table"></div>
+          <div class="measurement-hint muted small" id="measurement-hint">
+            Tap "Pick atoms" then click in the viewer. Two picks → distance, three → angle, four → dihedral.
+          </div>
+        </div>
+
+        <div class="control-section">
+          <h3>Structure Comparison</h3>
+          <p class="muted small">Load a second structure to superimpose and compute per-residue RMSD.</p>
+          <div class="highlight-actions">
+            <button class="btn btn-secondary" id="btn-enable-compare">⇄ Load structure B</button>
+            <button class="btn btn-secondary" id="btn-align-calpha">Align on Cα</button>
+            <button class="btn btn-ghost" id="btn-color-by-rmsd">Color by RMSD</button>
+          </div>
+          <div class="rmsd-summary" id="rmsd-summary"></div>
         </div>
       </div>
 
@@ -257,51 +339,40 @@
       </div>
       <div class="modal-body">
         <p>
-          <b>Protein Flow Explorer</b> is a free, open teaching tool for visualising the
-          3D structures of proteins. It is designed to make molecular biology easy to
-          understand and easy to explain — in a classroom, a presentation, or while
-          reading a paper.
+          <b>Protein Flow Explorer</b> is a free, open tool for visualising, measuring and
+          explaining 3D protein structures. Originally built for teaching — now extended
+          for working researchers with sequence navigation, atom picking,
+          UniProt / AlphaFold lookup, structure comparison, and shareable views.
         </p>
-        <h3>Three ways to explore</h3>
+        <h3>For students</h3>
         <ul>
-          <li>
-            <b>Controls.</b> Switch representations (cartoon, surface, sticks, …) and
-            colour schemes (chain, secondary structure, hydrophobicity, …) to inspect a
-            structure from any angle.
-          </li>
-          <li>
-            <b>Guided Tour.</b> A scripted, step-by-step walkthrough that highlights the
-            functional features of each curated protein. Great for teaching.
-          </li>
-          <li>
-            <b>Trajectory.</b> Play back a conformational change — hemoglobin T→R, kinase
-            open→closed, calmodulin extended→compact — by sliding between two PDB
-            states.
-          </li>
+          <li><b>Controls.</b> Switch representations (cartoon / surface / sticks) and colour schemes (chain / SS / hydrophobicity / …).</li>
+          <li><b>Guided Tour.</b> Scripted step-by-step walkthroughs for the curated proteins.</li>
+          <li><b>Trajectory.</b> Play back a conformational change (hemoglobin T→R, kinase open→closed, …).</li>
         </ul>
-        <h3>Load any molecule</h3>
-        <p>
-          Use the <b>PDB ID</b> input to fetch any structure from the open-access
-          <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB Protein Data Bank</a>,
-          or drop a <code>.pdb</code> / <code>.cif</code> file onto the drop zone to
-          load AlphaFold models, your own simulations, or any local structure. Custom
-          molecules stay in the library for the session and can be removed with the
-          × button on each card.
-        </p>
-        <h3>Technology</h3>
+        <h3>For researchers</h3>
         <ul>
-          <li>Rendering: <a href="https://3dmol.org" target="_blank" rel="noopener">3Dmol.js</a></li>
-          <li>Data: RCSB PDB (open-access)</li>
-          <li>Frontend: Vanilla HTML + CSS + JS, no build step</li>
+          <li><b>Measure.</b> Click atoms in the 3D view → distances (Å), angles (°), dihedrals (°). Up to four picks at once.</li>
+          <li><b>Sequence.</b> One-click navigation between sequence and structure. Click any residue to highlight it; click again to zoom.</li>
+          <li><b>UniProt lookup.</b> Type <code>TP53</code> or <code>P04637</code> → loads the matching PDB or AlphaFold model.</li>
+          <li><b>Compare.</b> Superimpose two structures on Cα and colour by per-residue RMSD.</li>
+          <li><b>Share link.</b> The current view (protein, state, style, colour, tour step, measurements) is encoded in the URL — paste a link to reproduce the exact view.</li>
+        </ul>
+        <h3>Data sources</h3>
+        <ul>
+          <li>Structures: <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB PDB</a>, <a href="https://alphafold.ebi.ac.uk" target="_blank" rel="noopener">AlphaFold DB</a></li>
+          <li>Identifiers: <a href="https://www.uniprot.org" target="_blank" rel="noopener">UniProt</a></li>
         </ul>
         <p class="muted small">
-          This is an educational tool, not for clinical use. Structure coordinates are
-          fetched live from RCSB; an internet connection is required the first time a
-          protein is opened.
+          Educational tool, not for clinical use. Structure coordinates are fetched live;
+          an internet connection is required the first time a protein is opened.
         </p>
       </div>
     </div>
   </div>
+
+  <!-- Toast / inline notice -->
+  <div id="toast" class="toast" hidden></div>
 
   <!-- 3Dmol.js core library -->
   <script src="https://cdn.jsdelivr.net/npm/3dmol@2.4.2/build/3Dmol-min.js"></script>
