@@ -322,6 +322,116 @@ a:hover { text-decoration: underline; }
   width: 100%;
 }
 
+/* ============== SEQUENCE PANEL ============== */
+.sequence-panel {
+  background: var(--bg-1);
+  border-top: 1px solid var(--border);
+  padding: 10px 14px;
+  flex-shrink: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.sequence-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.sequence-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.sequence-chains {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.sequence-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+
+.sequence-chain-label {
+  color: var(--text-2);
+  font-size: 10.5px;
+  min-width: 22px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.sequence-residue {
+  display: inline-block;
+  width: 12px;
+  height: 16px;
+  text-align: center;
+  border-radius: 2px;
+  cursor: pointer;
+  color: rgba(0, 0, 0, 0.85);
+  font-weight: 600;
+  font-size: 10px;
+  line-height: 16px;
+  transition: transform 0.1s;
+  position: relative;
+}
+
+.sequence-residue:hover {
+  transform: scale(1.4);
+  z-index: 2;
+  outline: 1.5px solid var(--accent);
+}
+
+.sequence-residue.active {
+  outline: 2px solid var(--accent-warm);
+  z-index: 3;
+}
+
+.sequence-residue.ss-helix {
+  border-radius: 6px;
+}
+.sequence-residue.ss-sheet {
+  transform: skewX(-12deg);
+}
+.sequence-residue.ss-coil {
+  border-radius: 2px;
+}
+
+.sequence-secondary {
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: var(--bg-2);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.sequence-secondary-bar {
+  display: inline-block;
+  height: 12px;
+  margin: 0 1px;
+  vertical-align: middle;
+  border-radius: 1px;
+}
+
+.sequence-secondary-bar.helix {
+  height: 14px;
+  border-radius: 7px;
+}
+.sequence-secondary-bar.sheet {
+  height: 10px;
+  transform: skewX(-12deg);
+}
+
 /* ============== PROTEIN LIST ============== */
 .protein-list {
   flex: 1;
@@ -914,116 +1024,6 @@ a:hover { text-decoration: underline; }
   font-family: inherit;
 }
 
-/* ============== SEQUENCE PANEL ============== */
-.sequence-panel {
-  background: var(--bg-1);
-  border-top: 1px solid var(--border);
-  padding: 10px 14px;
-  flex-shrink: 0;
-  max-height: 180px;
-  overflow-y: auto;
-}
-
-.sequence-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 6px;
-}
-
-.sequence-title {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-2);
-  font-weight: 600;
-}
-
-.sequence-chains {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  font-size: 11px;
-}
-
-.sequence-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  line-height: 1.5;
-}
-
-.sequence-chain-label {
-  color: var(--text-2);
-  font-size: 10.5px;
-  min-width: 22px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-
-.sequence-residue {
-  display: inline-block;
-  width: 12px;
-  height: 16px;
-  text-align: center;
-  border-radius: 2px;
-  cursor: pointer;
-  color: rgba(0, 0, 0, 0.85);
-  font-weight: 600;
-  font-size: 10px;
-  line-height: 16px;
-  transition: transform 0.1s;
-  position: relative;
-}
-
-.sequence-residue:hover {
-  transform: scale(1.4);
-  z-index: 2;
-  outline: 1.5px solid var(--accent);
-}
-
-.sequence-residue.active {
-  outline: 2px solid var(--accent-warm);
-  z-index: 3;
-}
-
-.sequence-residue.ss-helix {
-  border-radius: 6px;
-}
-.sequence-residue.ss-sheet {
-  transform: skewX(-12deg);
-}
-.sequence-residue.ss-coil {
-  border-radius: 2px;
-}
-
-.sequence-secondary {
-  margin-top: 8px;
-  font-size: 10.5px;
-  color: var(--text-2);
-  background: var(--bg-2);
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-}
-
-.sequence-secondary-bar {
-  display: inline-block;
-  height: 12px;
-  margin: 0 1px;
-  vertical-align: middle;
-  border-radius: 1px;
-}
-
-.sequence-secondary-bar.helix {
-  height: 14px;
-  border-radius: 7px;
-}
-.sequence-secondary-bar.sheet {
-  height: 10px;
-  transform: skewX(-12deg);
-}
-
 /* ============== MEASUREMENT TABLE ============== */
 .measurement-table {
   margin-top: 10px;
@@ -1118,6 +1118,140 @@ a:hover { text-decoration: underline; }
   height: 10px;
   background: var(--bg-1);
   border: 1px solid var(--bg-0);
+}
+
+/* ============== BIOINFORMATICS ANALYSIS PANELS ============== */
+.analysis-status {
+  margin-top: 8px;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  min-height: 1.5em;
+}
+
+/* pLDDT gradient (AlphaFold: blue → cyan → yellow → orange) */
+.legend-bar {
+  margin-top: 10px;
+}
+.legend-gradient {
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid var(--border);
+}
+.plddt-gradient {
+  background: linear-gradient(to right,
+    #ff7d45 0%,
+    #ffdb13 50%,
+    #65cbf3 70%,
+    #0053d6 90%,
+    #0053d6 100%);
+}
+.legend-ticks {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9.5px;
+  color: var(--text-2);
+  margin-top: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Inline legend swatches (conservation) */
+.legend-inline {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: 6px;
+}
+.swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  vertical-align: middle;
+}
+.swatch-low { background: #5b8def; }
+.swatch-mid { background: #f5c542; }
+.swatch-high { background: #cc1f1f; }
+
+/* Variant legend dots */
+.variant-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 10.5px;
+  color: var(--text-2);
+}
+.dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.dot-path { background: #b91c1c; }
+.dot-likpath { background: #f97316; }
+.dot-vus { background: #fbbf24; }
+.dot-likben { background: #84cc16; }
+.dot-ben { background: #22c55e; }
+
+/* Pocket / contact lists */
+.pocket-list, .contact-list {
+  margin-top: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.pocket-row, .contact-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.pocket-row:last-child, .contact-row:last-child {
+  border-bottom: none;
+}
+.pocket-rank {
+  font-weight: 600;
+  color: var(--accent-warm);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.pocket-name {
+  font-weight: 600;
+  color: var(--text-0);
+}
+.pocket-vol {
+  font-size: 10.5px;
+  color: var(--text-2);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.pocket-resis {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  color: var(--text-3);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: 0.02em;
+  margin-top: 2px;
+}
+.contact-dist {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  text-align: right;
+}
+.contact-type {
+  font-size: 10px;
+  color: var(--text-2);
+  text-align: right;
 }
 
 /* ============== TOAST ============== */
