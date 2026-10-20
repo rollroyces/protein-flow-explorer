@@ -13,6 +13,9 @@
  *    - UniProt / AlphaFold lookup
  *    - Side-by-side structure comparison + per-residue RMSD
  *    - URL state for sharing exact views
+ *    - Bioinformatics analyses: pLDDT confidence colouring,
+ *      MSA-derived conservation, ClinVar variant counts,
+ *      druggable-pocket detection, ligand-contact analysis.
  * =================================================================== */
 
 (function () {
@@ -58,6 +61,13 @@
     aligned: false,
     rmsdPerResidue: null,
     rmsdColorMode: false,
+
+    // ----- Bioinformatics analysis results -----
+    conservation: null,
+    conservationJob: null,
+    variants: [],
+    pockets: [],
+    ligandContacts: null,
   };
 
   // ====== DOM REFS ======
@@ -147,17 +157,33 @@
     btnColorByRmsd: $("btn-color-by-rmsd"),
     rmsdSummary: $("rmsd-summary"),
 
+    btnColorPlddt: $("btn-color-plddt"),
+    btnFetchConservation: $("btn-fetch-conservation"),
+    btnClearConservation: $("btn-clear-conservation"),
+    conservationStatus: $("conservation-status"),
+    btnFetchVariants: $("btn-fetch-variants"),
+    btnClearVariants: $("btn-clear-variants"),
+    variantsStatus: $("variants-status"),
+    btnDetectPockets: $("btn-detect-pockets"),
+    btnAnalyzeContacts: $("btn-analyze-contacts"),
+    btnClearBioGeo: $("btn-clear-bio-geo"),
+    pocketsStatus: $("pockets-status"),
+    contactsStatus: $("contacts-status"),
+    pocketList: $("pocket-list"),
+    contactList: $("contact-list"),
+
     btnAbout: $("btn-about"),
     aboutModal: $("about-modal"),
     btnCloseAbout: $("btn-close-about"),
     btnShare: $("btn-share"),
+
     toast: $("toast"),
   };
 
   // ====== UTILITIES ======
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+      "&": "&", "<": "<", ">": ">", '"': """, "'": "&#39;",
     })[c]);
   }
   function categoryLabel(c) {
@@ -259,7 +285,6 @@
       window.addEventListener("resize", () => state.viewer.resize());
     }
 
-    // Manual click for atom-picking (3Dmol.js 2.4.2 has no setClickHandler)
     const canvas = dom.viewer.querySelector("canvas");
     if (canvas) {
       canvas.addEventListener("click", (e) => {
@@ -1484,6 +1509,561 @@
   dom.btnCloseAbout.addEventListener("click", () => { dom.aboutModal.hidden = true; });
   dom.aboutModal.addEventListener("click", (e) => {
     if (e.target === dom.aboutModal) dom.aboutModal.hidden = true;
+  });
+
+  // ====== BIOINFORMATICS: pLDDT, Conservation, Variants, Pockets, Ligand Contacts ======
+  function plddtToColor(p) {
+    if (p >= 90) return 0x0053d6;
+    if (p >= 70) return 0x65cbf3;
+    if (p >= 50) return 0xffdb13;
+    return 0xff7d45;
+  }
+  function colorByPLDDT() {
+    if (!state.models.length) { showCustomError("No structure loaded."); return; }
+    if (!state.viewer) return;
+    state.viewer.setStyle({}, {
+      cartoon: { colorfunc: (atom) => plddtToColor(atom.b) },
+    });
+    state.viewer.render();
+    showToast("Coloured by AlphaFold pLDDT confidence", "success");
+  }
+  dom.btnColorPlddt.addEventListener("click", colorByPLDDT);
+
+  const NW_MATCH = 2;
+  const NW_MISMATCH = -1;
+  const NW_GAP = -2;
+  function nwAlign(a, b) {
+    const m = a.length, n = b.length;
+    const F = new Int16Array((m + 1) * (n + 1));
+    const Tb = new Uint8Array((m + 1) * (n + 1));
+    for (let i = 0; i <= m; i++) F[i * (n + 1)] = i * NW_GAP;
+    for (let j = 0; j <= n; j++) F[j] = j * NW_GAP;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const s = a[i - 1] === b[j - 1] ? NW_MATCH : NW_MISMATCH;
+        const diag = F[(i - 1) * (n + 1) + (j - 1)] + s;
+        const up = F[(i - 1) * (n + 1) + j] + NW_GAP;
+        const left = F[i * (n + 1) + (j - 1)] + NW_GAP;
+        let best = diag, dir = 0;
+        if (up > best) { best = up; dir = 1; }
+        if (left > best) { best = left; dir = 2; }
+        F[i * (n + 1) + j] = best;
+        Tb[i * (n + 1) + j] = dir;
+      }
+    }
+    let i = m, j = n, ai = "", bj = "";
+    while (i > 0 || j > 0) {
+      const dir = Tb[i * (n + 1) + j];
+      if (i > 0 && j > 0 && dir === 0) { ai = a[i - 1] + ai; bj = b[j - 1] + bj; i--; j--; }
+      else if (i > 0 && dir === 1) { ai = a[i - 1] + ai; bj = "-" + bj; i--; }
+      else { ai = "-" + ai; bj = b[j - 1] + bj; j--; }
+    }
+    return { a: ai, b: bj };
+  }
+
+  function progressiveMsa(seqs) {
+    if (seqs.length === 0) return [];
+    let consensus = seqs[0];
+    let aligned = [consensus.split("")];
+    for (let i = 1; i < seqs.length; i++) {
+      const result = nwAlign(consensus, seqs[i]);
+      const newAligned = aligned.map((row) => {
+        const s = row.join("");
+        const r = nwAlign(result.a, s);
+        return r.b.split("");
+      });
+      newAligned.push(result.b.split(""));
+      consensus = result.a;
+      aligned = newAligned;
+    }
+    const len = consensus.length;
+    for (const row of aligned) {
+      while (row.length < len) row.push("-");
+    }
+    return { consensus, aligned };
+  }
+
+  function conservationScores(msa) {
+    const cons = msa.consensus;
+    const n = cons.length;
+    const out = new Array(n).fill(1);
+    for (let j = 0; j < n; j++) {
+      const ref = cons[j];
+      if (ref === "-") { out[j] = 0; continue; }
+      let matches = 0, total = 0;
+      for (const row of msa.aligned) {
+        const ch = row[j];
+        if (ch === "-") continue;
+        total++;
+        if (ch === ref) matches++;
+      }
+      out[j] = total > 0 ? matches / total : 0;
+    }
+    return out;
+  }
+
+  async function fetchRcsbUniprotMapping(pdbId) {
+    try {
+      const url = `https://data.rcsb.org/rest/v1/core/entry/${pdbId.toLowerCase()}`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const entities = j.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
+      for (const eid of entities) {
+        try {
+          const er = await fetch(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
+          if (!er.ok) continue;
+          const ej = await er.json();
+          const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
+          for (const ref of refs) {
+            if (ref.database_accession && ref.database_name === "UniProt") {
+              return ref.database_accession;
+            }
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function buildResidueIndex(pdbText) {
+    const map = new Map();
+    let seqIdx = -1;
+    const seen = new Set();
+    const arr = [];
+    const lines = pdbText.split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.startsWith("ATOM")) continue;
+      const atomName = line.substring(12, 16).trim();
+      if (atomName !== "CA") continue;
+      const chain = line.substring(21, 22).trim() || "A";
+      const resi = parseInt(line.substring(22, 26).trim(), 10);
+      const resn = line.substring(17, 20).trim();
+      const key = chain + ":" + resi;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      seqIdx++;
+      map.set(key, { seqIdx, resn });
+      arr[seqIdx] = AA3TO1[resn] || "X";
+    }
+    return { map, sequence: arr.join("") };
+  }
+
+  function parseFastaSequences(text) {
+    const out = [];
+    const lines = text.split(/\r?\n/);
+    let cur = "";
+    for (const line of lines) {
+      if (line.startsWith(">")) { if (cur) out.push(cur); cur = ""; }
+      else cur += line.trim();
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  async function loadConservation() {
+    if (state.conservationJob) return state.conservationJob;
+    if (!state._lastPdbText || !state.currentProtein) {
+      showCustomError("Load a protein first.");
+      return;
+    }
+    const pdbId = state.currentProtein.pdbIds[state.currentPdbIndex];
+    dom.conservationStatus.textContent = "Looking up UniProt accession…";
+    dom.btnFetchConservation.disabled = true;
+
+    const job = (async () => {
+      try {
+        const acc = await fetchRcsbUniprotMapping(pdbId);
+        if (!acc) {
+          dom.conservationStatus.textContent = "No UniProt mapping found for this PDB.";
+          return;
+        }
+        dom.conservationStatus.textContent = `Fetching canonical sequence (${acc})…`;
+        const fastaUrl = `https://rest.uniprot.org/uniprotkb/${acc}.fasta`;
+        const fr = await fetch(fastaUrl);
+        if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
+        const fastaText = await fr.text();
+        const seqs = parseFastaSequences(fastaText);
+        const canonical = seqs[0] || "";
+        if (!canonical) throw new Error("Empty canonical sequence");
+
+        dom.conservationStatus.textContent = "Fetching homologs…";
+        const protName = state.currentProtein.name.split(/[·•:()\-]/)[0].trim();
+        const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
+        const sr = await fetch(searchUrl);
+        const homologs = sr.ok ? parseFastaSequences(await sr.text()) : [];
+
+        const allSeqs = [canonical, ...homologs].slice(0, 10);
+        dom.conservationStatus.textContent = `Aligning ${allSeqs.length} sequences…`;
+        const msa = progressiveMsa(allSeqs);
+        const scores = conservationScores(msa);
+
+        const { map: residueMap } = buildResidueIndex(state._lastPdbText);
+        const conservationByResidue = new Map();
+        for (const [key, v] of residueMap) {
+          if (v.seqIdx < scores.length) conservationByResidue.set(key, scores[v.seqIdx]);
+        }
+        state.conservation = { byResidue: conservationByResidue, homologs: allSeqs.length - 1 };
+
+        state.viewer.setStyle({}, {
+          cartoon: { colorfunc: (atom) => {
+            const c = conservationByResidue.get(`${atom.chain}:${atom.resi}`);
+            if (c === undefined) return 0xcccccc;
+            const t = c;
+            const r = Math.round(0x5b + (0xcc - 0x5b) * t);
+            const g = Math.round(0x8d + (0x1f - 0x8d) * t);
+            const b = Math.round(0xef + (0x1f - 0xef) * t);
+            return (r << 16) | (g << 8) | b;
+          } },
+        });
+        state.viewer.render();
+        dom.conservationStatus.textContent = `Conservation: ${allSeqs.length - 1} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
+        showToast("Conservation map applied", "success");
+      } catch (err) {
+        dom.conservationStatus.textContent = `MSA failed: ${err.message}`;
+        showCustomError(`Conservation fetch failed: ${err.message}`);
+      } finally {
+        dom.btnFetchConservation.disabled = false;
+        state.conservationJob = null;
+      }
+    })();
+    state.conservationJob = job;
+    return job;
+  }
+  dom.btnFetchConservation.addEventListener("click", loadConservation);
+  dom.btnClearConservation.addEventListener("click", () => {
+    state.conservation = null;
+    applyAllStyles();
+    state.viewer.render();
+    dom.conservationStatus.textContent = "No conservation loaded.";
+  });
+
+  async function fetchVariants() {
+    if (!state.currentProtein) { showCustomError("Load a protein first."); return; }
+    dom.variantsStatus.textContent = "Querying ClinVar…";
+    dom.btnFetchVariants.disabled = true;
+    try {
+      const prot = state.currentProtein;
+      const geneGuess =
+        prot.id === "p53" ? "TP53" :
+        prot.id === "egfr-kinase" ? "EGFR" :
+        prot.id === "kras-g12c" ? "KRAS" :
+        prot.id === "hiv-protease" ? "PR" :
+        prot.id === "calmodulin" ? "CALM1" :
+        prot.id === "insulin" ? "INS" :
+        prot.id === "hemoglobin" ? "HBB" :
+        prot.id === "lysozyme" ? "LYZ" :
+        prot.id === "myoglobin" ? "MB" :
+        null;
+      if (!geneGuess) {
+        dom.variantsStatus.textContent = "No gene-symbol mapping for this entry. Try TP53/EGFR/KRAS.";
+        return;
+      }
+      const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(geneGuess + "[gene]")}&retmax=200&retmode=json`;
+      const r = await fetch(esearchUrl);
+      if (!r.ok) throw new Error(`ClinVar esearch ${r.status}`);
+      const j = await r.json();
+      const ids = (j.esearchresult && j.esearchresult.idlist) || [];
+      if (ids.length === 0) {
+        dom.variantsStatus.textContent = `No ClinVar records found for ${geneGuess}.`;
+        return;
+      }
+      dom.variantsStatus.textContent = `Found ${ids.length} ClinVar records. Summarising…`;
+      const variants = [];
+      const batch = ids.slice(0, 40);
+      for (const id of batch) {
+        try {
+          const surl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${id}&retmode=json`;
+          const sr = await fetch(surl);
+          if (!sr.ok) continue;
+          const sj = await sr.json();
+          const r2 = sj.result && sj.result[id];
+          if (!r2) continue;
+          const trait = (r2.clinical_significance && r2.clinical_significance.description) || "";
+          const sig = trait.toLowerCase().includes("pathogenic") && !trait.toLowerCase().includes("benign")
+            ? (trait.toLowerCase().includes("likely") ? "likely_pathogenic" : "pathogenic")
+            : trait.toLowerCase().includes("benign")
+            ? (trait.toLowerCase().includes("likely") ? "likely_benign" : "benign")
+            : "vus";
+          variants.push({ id, sig, trait });
+        } catch (e) {}
+      }
+      const tally = { pathogenic: 0, likely_pathogenic: 0, vus: 0, likely_benign: 0, benign: 0 };
+      for (const v of variants) tally[v.sig] = (tally[v.sig] || 0) + 1;
+      state.variants = variants;
+      dom.variantsStatus.innerHTML =
+        `<b>${geneGuess}</b> · ${variants.length} variants from ${ids.length} ClinVar records:<br>` +
+        `<span style="color:#b91c1c">● ${tally.pathogenic} pathogenic</span> · ` +
+        `<span style="color:#f97316">● ${tally.likely_pathogenic} likely path.</span> · ` +
+        `<span style="color:#fbbf24">● ${tally.vus} VUS</span> · ` +
+        `<span style="color:#84cc16">● ${tally.likely_benign} likely ben.</span> · ` +
+        `<span style="color:#22c55e">● ${tally.benign} benign</span><br>` +
+        `<span class="muted small">Summary count by clinical significance. Per-residue mapping requires UniProt SIFTS lookup (next iteration).</span>`;
+      showToast(`Loaded ${variants.length} ClinVar entries for ${geneGuess}`, "success");
+    } catch (err) {
+      dom.variantsStatus.textContent = `ClinVar fetch failed: ${err.message}`;
+      showCustomError(`ClinVar fetch failed: ${err.message}`);
+    } finally {
+      dom.btnFetchVariants.disabled = false;
+    }
+  }
+  dom.btnFetchVariants.addEventListener("click", fetchVariants);
+  dom.btnClearVariants.addEventListener("click", () => {
+    state.variants = [];
+    dom.variantsStatus.textContent = "No variants loaded.";
+    applyAllStyles();
+    state.viewer.render();
+  });
+
+  function detectPockets() {
+    if (!state.models.length) { showCustomError("No structure loaded."); return; }
+    dom.btnDetectPockets.disabled = true;
+    dom.pocketsStatus.textContent = "Scanning alpha-spheres…";
+    try {
+      const model = state.models[state.currentPdbIndex];
+      const atoms = model.selectedAtoms({});
+      if (!atoms.length) { dom.pocketsStatus.textContent = "No atoms in structure."; return; }
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (const a of atoms) {
+        if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+        if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+        if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
+      }
+      const PAD = 5;
+      minX -= PAD; minY -= PAD; minZ -= PAD;
+      maxX += PAD; maxY += PAD; maxZ += PAD;
+      const GRID = 1.4;
+      const PROBE_RADIUS_MAX = 6.0;
+      const SCORE_THRESHOLD = 5;
+      const cellSize = PROBE_RADIUS_MAX + 1;
+      const grid = new Map();
+      function cellKey(x, y, z) {
+        return `${Math.floor(x / cellSize)}|${Math.floor(y / cellSize)}|${Math.floor(z / cellSize)}`;
+      }
+      for (const a of atoms) {
+        const k = cellKey(a.x, a.y, a.z);
+        let arr = grid.get(k);
+        if (!arr) { arr = []; grid.set(k, arr); }
+        arr.push(a);
+      }
+      function countNearby(x, y, z, radius) {
+        const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize), cz = Math.floor(z / cellSize);
+        const span = Math.ceil(radius / cellSize);
+        let count = 0;
+        for (let dx = -span; dx <= span; dx++) {
+          for (let dy = -span; dy <= span; dy++) {
+            for (let dz = -span; dz <= span; dz++) {
+              const arr = grid.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
+              if (!arr) continue;
+              const r2 = radius * radius;
+              for (let i = 0; i < arr.length; i++) {
+                const a = arr[i];
+                const ddx = a.x - x, ddy = a.y - y, ddz = a.z - z;
+                if (ddx * ddx + ddy * ddy + ddz * ddz < r2) count++;
+              }
+            }
+          }
+        }
+        return count;
+      }
+      const alphaCentres = [];
+      for (let x = minX; x <= maxX; x += GRID) {
+        for (let y = minY; y <= maxY; y += GRID) {
+          for (let z = minZ; z <= maxZ; z += GRID) {
+            const count = countNearby(x, y, z, PROBE_RADIUS_MAX);
+            if (count >= SCORE_THRESHOLD * 2) {
+              alphaCentres.push({ x, y, z, r: PROBE_RADIUS_MAX, score: count });
+            }
+          }
+        }
+      }
+      const visited = new Set();
+      const pockets = [];
+      for (let i = 0; i < alphaCentres.length; i++) {
+        if (visited.has(i)) continue;
+        const seed = alphaCentres[i];
+        const queue = [i];
+        const cluster = [];
+        visited.add(i);
+        while (queue.length) {
+          const idx = queue.shift();
+          cluster.push(alphaCentres[idx]);
+          for (let j = 0; j < alphaCentres.length; j++) {
+            if (visited.has(j)) continue;
+            const dx = alphaCentres[j].x - alphaCentres[idx].x;
+            const dy = alphaCentres[j].y - alphaCentres[idx].y;
+            const dz = alphaCentres[j].z - alphaCentres[idx].z;
+            if (dx * dx + dy * dy + dz * dz < 9) { visited.add(j); queue.push(j); }
+          }
+        }
+        if (cluster.length >= 3) {
+          let cx = 0, cy = 0, cz = 0, score = 0;
+          for (const p of cluster) { cx += p.x; cy += p.y; cz += p.z; score += p.score; }
+          const n = cluster.length;
+          pockets.push({
+            center: [cx / n, cy / n, cz / n],
+            volume: (4 / 3) * Math.PI * Math.pow(cluster[0].r, 3) * n * 0.4,
+            score: score / n,
+            residues: [],
+          });
+        }
+      }
+      for (const p of pockets) {
+        const resiSet = new Set();
+        const radius = Math.cbrt(p.volume * 0.75 / Math.PI) + 4;
+        const r2 = radius * radius;
+        for (const a of atoms) {
+          const dx = a.x - p.center[0], dy = a.y - p.center[1], dz = a.z - p.center[2];
+          if (dx * dx + dy * dy + dz * dz < r2) resiSet.add(`${a.chain}:${a.resi}`);
+        }
+        p.residues = Array.from(resiSet).slice(0, 25);
+      }
+      pockets.sort((a, b) => b.volume - a.volume);
+      const top = pockets.slice(0, 8);
+      state.pockets = top;
+
+      state.viewer.removeAllShapes();
+      top.forEach((p, i) => {
+        const color = i === 0 ? 0xff7d45 : (i === 1 ? 0xffdb13 : 0x65cbf3);
+        state.viewer.addSphere({
+          center: { x: p.center[0], y: p.center[1], z: p.center[2] },
+          radius: Math.cbrt(p.volume * 0.75 / Math.PI),
+          color, opacity: 0.45,
+        });
+      });
+      const allResis = new Set();
+      for (const p of top) for (const r of p.residues) allResis.add(r);
+      for (const r of allResis) {
+        const [chain, resi] = r.split(":");
+        state.viewer.addStyle({ chain, resi: parseInt(resi, 10) }, { stick: { radius: 0.12, color: 0xff7d45 } });
+      }
+      state.viewer.render();
+
+      dom.pocketList.innerHTML = top.map((p, i) => `
+        <div class="pocket-row">
+          <span class="pocket-rank">#${i + 1}</span>
+          <span class="pocket-vol">${p.volume.toFixed(0)} ų</span>
+          <span class="pocket-name">score ${p.score.toFixed(1)}</span>
+          <span class="pocket-resis">${p.residues.slice(0, 12).join(" ")}${p.residues.length > 12 ? " …" : ""}</span>
+        </div>
+      `).join("") || '<div class="measurement-table-empty">No pockets found</div>';
+      dom.pocketsStatus.textContent = `Found ${top.length} pocket${top.length === 1 ? "" : "s"} (volumes in ų).`;
+    } catch (err) {
+      dom.pocketsStatus.textContent = `Pocket detection failed: ${err.message}`;
+    } finally {
+      dom.btnDetectPockets.disabled = false;
+    }
+  }
+  dom.btnDetectPockets.addEventListener("click", detectPockets);
+
+  function analyzeContacts() {
+    if (!state.models.length) { showCustomError("No structure loaded."); return; }
+    dom.btnAnalyzeContacts.disabled = true;
+    dom.contactsStatus.textContent = "Finding ligands…";
+    try {
+      const model = state.models[state.currentPdbIndex];
+      const allAtoms = model.selectedAtoms({});
+      const waters = new Set(["HOH", "WAT", "H2O", "DOD"]);
+      const ligands = allAtoms.filter((a) => {
+        const resn = (a.resn || "").trim().toUpperCase();
+        if (waters.has(resn)) return false;
+        return a.hetflag === true;
+      });
+      if (ligands.length === 0) {
+        dom.contactsStatus.textContent = "No bound ligand detected in this structure.";
+        dom.contactList.innerHTML = "";
+        return;
+      }
+      const ligandGroups = {};
+      for (const a of ligands) {
+        const key = `${a.chain || ""}:${a.resn}:${a.resi}`;
+        (ligandGroups[key] = ligandGroups[key] || { atoms: [], resn: a.resn, chain: a.chain, resi: a.resi }).atoms.push(a);
+      }
+      const CUTOFF = 4.0;
+      const contacts = [];
+      for (const [lname, lg] of Object.entries(ligandGroups)) {
+        const contactSet = new Map();
+        for (const la of lg.atoms) {
+          for (const a of allAtoms) {
+            if (a === la) continue;
+            if (a.resn === la.resn && a.chain === la.chain) continue;
+            const dx = a.x - la.x, dy = a.y - la.y, dz = a.z - la.z;
+            const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (d <= CUTOFF) {
+              const key = `${a.chain || ""}:${a.resi}`;
+              const prev = contactSet.get(key);
+              if (!prev || d < prev.d) contactSet.set(key, { d, resn: a.resn, chain: a.chain, resi: a.resi, atom: a.atom });
+            }
+          }
+        }
+        const sorted = Array.from(contactSet.values()).sort((a, b) => a.d - b.d);
+        if (sorted.length) {
+          contacts.push({ ligand: `${lg.resn}:${lg.resi}`, chain: lg.chain, resi: lg.resi, residues: sorted });
+        }
+      }
+      if (!contacts.length) {
+        dom.contactsStatus.textContent = "Ligands found but no protein residues within 4 Å.";
+        dom.contactList.innerHTML = "";
+        return;
+      }
+      state.ligandContacts = contacts;
+      state.viewer.removeAllShapes();
+      contacts.forEach((c) => {
+        c.residues.forEach((r) => {
+          state.viewer.addStyle({ chain: r.chain, resi: r.resi }, { stick: { radius: 0.18, color: 0xfbbf24 } });
+        });
+        const lg = ligandGroups[`${c.chain}:${c.ligand.split(":")[1]}:${c.resi}`];
+        if (lg) {
+          let cx = 0, cy = 0, cz = 0;
+          for (const a of lg.atoms) { cx += a.x; cy += a.y; cz += a.z; }
+          const lCenter = { x: cx / lg.atoms.length, y: cy / lg.atoms.length, z: cz / lg.atoms.length };
+          c.residues.forEach((r) => {
+            const ca = allAtoms.find((a) => a.atom === "CA" && a.chain === r.chain && a.resi === r.resi);
+            if (ca) {
+              try {
+                state.viewer.addCylinder({
+                  start: lCenter, end: ca, radius: 0.04, color: 0xfbbf24, dashed: true,
+                });
+              } catch (e) {}
+            }
+          });
+        }
+      });
+      state.viewer.render();
+      dom.contactList.innerHTML = contacts.map((c) => {
+        const rrows = c.residues.map((r) => {
+          const t = r.atom === "C" ? "phobic" : (r.atom === "N" || r.atom === "O" ? "polar" : "—");
+          return `<div class="contact-row">
+            <span>${r.resn}${r.resi}.${r.atom}</span>
+            <span class="contact-dist">${r.d.toFixed(2)} Å</span>
+            <span class="contact-type">${t}</span>
+          </div>`;
+        }).join("");
+        return `<div style="padding: 8px 10px; border-bottom: 1px solid var(--border)">
+          <b>${c.ligand}</b> — ${c.residues.length} residues within 4 Å
+          ${rrows}
+        </div>`;
+      }).join("");
+      dom.contactsStatus.textContent = `Found ${contacts.reduce((a, c) => a + c.residues.length, 0)} contacts across ${contacts.length} ligand${contacts.length === 1 ? "" : "s"}.`;
+    } catch (err) {
+      dom.contactsStatus.textContent = `Contact analysis failed: ${err.message}`;
+    } finally {
+      dom.btnAnalyzeContacts.disabled = false;
+    }
+  }
+  dom.btnAnalyzeContacts.addEventListener("click", analyzeContacts);
+
+  dom.btnClearBioGeo.addEventListener("click", () => {
+    state.pockets = [];
+    state.ligandContacts = null;
+    state.viewer.removeAllShapes();
+    applyAllStyles();
+    state.viewer.render();
+    dom.pocketList.innerHTML = "";
+    dom.contactList.innerHTML = "";
+    dom.pocketsStatus.textContent = "No pockets detected.";
+    dom.contactsStatus.textContent = "No ligand contacts.";
   });
 
   // ====== BOOTSTRAP ======
