@@ -685,6 +685,7 @@
 
     state.currentProtein = protein;
     state.currentPdbIndex = 0;
+    state._chainOrder = []; // reset chain->colour mapping for the new structure
 
     dom.currentProteinName.textContent = protein.name;
     updateStateBadge(0);
@@ -773,6 +774,39 @@
   }
 
   // ====== STYLING ======
+
+  // 3Dmol's built-in 'chain' scheme is a poor palette: chains B/J/O/P/R/T render as
+  // grey or near-black, and the rest are washed-out pastels. We use our own
+  // colourblind-friendly palette via colorfunc so every chain is clearly distinct
+  // regardless of its letter.
+  const STRUCT_CHAIN_PALETTE = [
+    0x2f7ed8, // blue
+    0xef553b, // red-orange
+    0x00a878, // teal-green
+    0xf2b705, // amber
+    0x9b5de5, // violet
+    0x00b4d8, // cyan
+    0xe76f51, // coral
+    0x6a994e, // olive
+    0xc77dff, // lilac
+    0xff8fab, // pink
+  ];
+  function chainColorFunc(atom) {
+    const idx = chainIndex(atom.chain);
+    return STRUCT_CHAIN_PALETTE[idx % STRUCT_CHAIN_PALETTE.length];
+  }
+  // Stable per-structure chain ordering (A, B, C …) so colours don't shuffle between models.
+  function chainIndex(chainId) {
+    if (!state._chainOrder) state._chainOrder = [];
+    const key = (chainId || "A").trim() || "A";
+    let i = state._chainOrder.indexOf(key);
+    if (i === -1) {
+      i = state._chainOrder.length;
+      state._chainOrder.push(key);
+    }
+    return i;
+  }
+
   function applyAllStyles() {
     state.models.forEach((m, idx) => applyStyleToModel(m, idx));
     // Re-apply RMSD coloring if active
@@ -792,25 +826,34 @@
     }
   }
 
+  // Resolve a colour-scheme name to a 3Dmol colour spec.
+  // "chain" and "byDomain" are handled by us; everything else is passed to 3Dmol,
+  // which knows spectrum / ss / element / residue / hydrophobicity / bFactor.
+  function resolveColor(colorName, opacity) {
+    if (colorName === "chain" || colorName === "byDomain") {
+      return { colorfunc: chainColorFunc, opacity };
+    }
+    return { color: colorName, opacity };
+  }
+
   function getStyleSpec(styleName, colorName, opacity) {
-    const base = { opacity };
     switch (styleName) {
       case "cartoon":
-        return { cartoon: { ...base, color: colorName } };
+        return { cartoon: resolveColor(colorName, opacity) };
       case "surface":
-        return { surface: { ...base, color: colorName, opacity: 0.85 } };
+        return { surface: { ...resolveColor(colorName, opacity), opacity: opacity * 0.85 } };
       case "ball+stick":
-        return { stick: { ...base, color: colorName, radius: 0.15 } };
+        return { stick: { ...resolveColor(colorName, opacity), radius: 0.15 } };
       case "stick":
-        return { stick: { ...base, color: colorName, radius: 0.18 } };
+        return { stick: { ...resolveColor(colorName, opacity), radius: 0.18 } };
       case "spacefill":
-        return { sphere: { ...base, color: colorName, scale: 0.3 } };
+        return { sphere: { ...resolveColor(colorName, opacity), scale: 0.3 } };
       case "ribbon":
-        return { ribbon: { ...base, color: colorName } };
+        return { ribbon: resolveColor(colorName, opacity) };
       case "line":
-        return { line: { ...base, color: colorName } };
+        return { line: resolveColor(colorName, opacity) };
       default:
-        return { cartoon: { ...base, color: colorName } };
+        return { cartoon: resolveColor(colorName, opacity) };
     }
   }
 
@@ -952,7 +995,6 @@
     M: "#80a0f0", F: "#80a0f0", P: "#ffff00", S: "#00ff00",
     T: "#00ff00", W: "#80a0f0", Y: "#15a4a4", V: "#80a0f0",
   };
-  const CHAIN_PALETTE = ["#5fc7ff", "#ff8a65", "#a78bfa", "#81c784", "#ffb74d", "#f06292", "#4dd0e1", "#ba68c8"];
 
   function parseAndRenderSequence() {
     if (!state._lastPdbText || !state.models.length) {
@@ -2316,7 +2358,7 @@
       applyAllStyles();
     }
     if (a.surface) {
-      state.viewer.addSurface($3Dmol.SurfaceType.VDW, { opacity: a.surface.opacity, color: state.currentColor }, {});
+      state.viewer.addSurface($3Dmol.SurfaceType.VDW, { ...resolveColor(state.currentColor, a.surface.opacity), opacity: a.surface.opacity }, {});
     }
     if (a.showSticks) {
       const target = a.showSticks;
@@ -2377,17 +2419,19 @@
       dom.trajectoryDesc.textContent = traj.description;
       dom.trajStateA.textContent = traj.states[traj.pdbIndexA];
       dom.trajStateB.textContent = traj.states[traj.pdbIndexB];
-      dom.trajSlider.value = 50;
-      dom.trajPercent.textContent = "50";
-      state.trajectoryValue = 50;
+      // Default to state A fully opaque. 50% would superimpose both conformations,
+      // which reads as a washed-out ghost rather than a clean structure.
+      dom.trajSlider.value = 0;
+      dom.trajPercent.textContent = "0";
+      state.trajectoryValue = 0;
       stopTrajectory();
-      updateTrajectoryBlend(50);
+      updateTrajectoryBlend(0);
     } else {
       dom.trajectoryEmpty.hidden = false;
       dom.trajectoryContent.hidden = true;
     }
   }
-  function setupTrajectoryInitial() { updateTrajectoryBlend(50); }
+  function setupTrajectoryInitial() { updateTrajectoryBlend(0); }
   function updateTrajectoryBlend(value) {
     if (!state.currentProtein) return;
     const traj = TRAJECTORIES[state.currentProtein.id];
@@ -2398,8 +2442,8 @@
     const t = value / 100;
     const opacityA = 1 - t;
     const opacityB = t;
-    state.viewer.setStyle({ model: idxA }, { cartoon: { color: state.currentColor, opacity: opacityA } });
-    state.viewer.setStyle({ model: idxB }, { cartoon: { color: state.currentColor, opacity: opacityB } });
+    state.viewer.setStyle({ model: idxA }, { cartoon: resolveColor(state.currentColor, opacityA) });
+    state.viewer.setStyle({ model: idxB }, { cartoon: resolveColor(state.currentColor, opacityB) });
     const protein = state.currentProtein;
     if (protein.highlights && protein.highlights.ligand) {
       const ligandResn = protein.highlights.ligand.resn;
@@ -2418,10 +2462,10 @@
   dom.btnTrajPause.addEventListener("click", () => stopTrajectory());
   dom.btnTrajReset.addEventListener("click", () => {
     stopTrajectory();
-    state.trajectoryValue = 50;
-    dom.trajSlider.value = 50;
-    dom.trajPercent.textContent = "50";
-    updateTrajectoryBlend(50);
+    state.trajectoryValue = 0;
+    dom.trajSlider.value = 0;
+    dom.trajPercent.textContent = "0";
+    updateTrajectoryBlend(0);
   });
   function playTrajectory() {
     state.trajectoryRunning = true;
