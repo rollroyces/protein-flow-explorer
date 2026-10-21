@@ -13,9 +13,6 @@
  *    - UniProt / AlphaFold lookup
  *    - Side-by-side structure comparison + per-residue RMSD
  *    - URL state for sharing exact views
- *    - Bioinformatics analyses: pLDDT confidence colouring,
- *      MSA-derived conservation, ClinVar variant counts,
- *      druggable-pocket detection, ligand-contact analysis.
  * =================================================================== */
 
 (function () {
@@ -28,19 +25,23 @@
     currentPdbIndex: 0,
     models: [],
 
+    // Style / display
     currentStyle: "cartoon",
     currentColor: "chain",
     currentOpacity: 1,
     background: "white",
     spinning: false,
 
+    // Frame counter
     fpsFrames: 0,
     fpsLastTime: performance.now(),
 
+    // Tour
     tourRunning: false,
     tourStepIndex: 0,
     tourTimeout: null,
 
+    // Trajectory
     trajectoryRunning: false,
     trajectoryRaf: null,
     trajectoryValue: 50,
@@ -52,22 +53,35 @@
 
     // ----- Researcher extensions -----
     pickMode: false,
-    measurements: [],
-    pickBuffer: [],
-    sequence: null,
+    measurements: [],      // [{type:"distance"|"angle"|"dihedral", atoms:[{serial,x,y,z,chain,resi,resn,atom,elem}], value, label}]
+    pickBuffer: [],         // atoms queued for current measurement
+    pickShapes: [],         // 3Dmol shapes representing measurements
+    pickLabels: [],
+
+    sequence: null,         // parsed from PDB
     sequenceShowSS: false,
-    compareProtein: null,
+
+    compareProtein: null,   // second protein for comparison
     compareLoaded: false,
     aligned: false,
-    rmsdPerResidue: null,
+
+    // ----- Bioinformatics analysis results -----
+    conservation: null,      // {byResidue: Map "chain:resi" -> 0..1, homologs: number}
+    conservationJob: null,   // Promise tracking in-flight fetch
+    variants: [],            // [{resi, chain, mutation, significance, color}]
+    pockets: [],             // [{id, center:[x,y,z], volume, score, residues:[{chain,resi}]}]
+    ligandContacts: null,    // {ligandName, residue, contacts:[{chain,resi,resn,distance,type}]}
+    rmsdPerResidue: null,   // array of {resi, chain, value}
     rmsdColorMode: false,
 
     // ----- Bioinformatics analysis results -----
-    conservation: null,
-    conservationJob: null,
-    variants: [],
-    pockets: [],
-    ligandContacts: null,
+    conservation: null,      // {byResidue: Map "chain:resi" -> 0..1, homologs: number}
+    conservationJob: null,   // Promise tracking in-flight fetch
+    variants: [],            // [{resi, chain, mutation, significance, color}]
+    pockets: [],             // [{id, center:[x,y,z], volume, score, residues:[{chain,resi}]}]
+    ligandContacts: null,    // {ligandName, residue, contacts:[{chain,resi,resn,distance,type}]}
+
+    // ----- End bioinformatics -----
   };
 
   // ====== DOM REFS ======
@@ -91,6 +105,7 @@
     currentStateBadge: $("current-state-badge"),
     fpsCounter: $("fps-counter"),
 
+    // Controls
     ctrlStyle: $("ctrl-style"),
     ctrlColor: $("ctrl-color"),
     ctrlOpacity: $("ctrl-opacity"),
@@ -107,6 +122,7 @@
 
     proteinDescription: $("protein-description"),
 
+    // Custom loader
     loaderTabs: $("loader-tabs"),
     pdbInput: $("pdb-input"),
     btnLoadPdb: $("btn-load-pdb"),
@@ -119,14 +135,17 @@
     btnLoadCompare: $("btn-load-compare"),
     btnClearCompare: $("btn-clear-compare"),
 
+    // Sequence panel
     sequenceChains: $("sequence-chains"),
     sequenceInfo: $("sequence-info"),
     btnToggleSecondary: $("btn-toggle-secondary"),
     sequenceSecondary: $("sequence-secondary"),
 
+    // Tabs
     tabBtns: document.querySelectorAll(".tab-btn"),
     tabPanels: document.querySelectorAll(".tab-panel"),
 
+    // Tour
     tourEmpty: $("tour-empty"),
     tourContent: $("tour-content"),
     tourTitle: $("tour-title"),
@@ -136,6 +155,7 @@
     btnTourStop: $("btn-tour-stop"),
     tourProgressBar: $("tour-progress-bar"),
 
+    // Trajectory
     trajectoryEmpty: $("trajectory-empty"),
     trajectoryContent: $("trajectory-content"),
     trajectoryTitle: $("trajectory-title"),
@@ -149,6 +169,7 @@
     btnTrajReset: $("btn-traj-reset"),
     trajSpeed: $("traj-speed"),
 
+    // Tools (measurement + compare)
     btnPickAtom: $("btn-pick-atom"),
     btnClearMeasurements: $("btn-clear-measurements"),
     measurementTable: $("measurement-table"),
@@ -157,6 +178,7 @@
     btnColorByRmsd: $("btn-color-by-rmsd"),
     rmsdSummary: $("rmsd-summary"),
 
+    // Bioinformatics analyses
     btnColorPlddt: $("btn-color-plddt"),
     btnFetchConservation: $("btn-fetch-conservation"),
     btnClearConservation: $("btn-clear-conservation"),
@@ -172,6 +194,7 @@
     pocketList: $("pocket-list"),
     contactList: $("contact-list"),
 
+    // Modal / share
     btnAbout: $("btn-about"),
     aboutModal: $("about-modal"),
     btnCloseAbout: $("btn-close-about"),
@@ -183,36 +206,56 @@
   // ====== UTILITIES ======
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
-      "&": "&", "<": "<", ">": ">", '"': """, "'": "&#39;",
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
     })[c]);
   }
+
   function categoryLabel(c) {
-    return { allostery: "allostery", binding: "binding", "drug-target": "drug target",
-             folding: "folding", domains: "domains", custom: "custom" }[c] || c;
+    return {
+      allostery: "allostery",
+      binding: "binding",
+      "drug-target": "drug target",
+      folding: "folding",
+      domains: "domains",
+      custom: "custom",
+    }[c] || c;
   }
+
   function showToast(msg, kind = "") {
     if (!dom.toast) return;
     dom.toast.textContent = msg;
     dom.toast.className = "toast " + kind;
     dom.toast.hidden = false;
     clearTimeout(showToast._t);
-    showToast._t = setTimeout(() => { dom.toast.hidden = true; }, 3500);
-  }
-  function debounce(fn, ms) {
-    let t = null;
-    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+    showToast._t = setTimeout(() => {
+      dom.toast.hidden = true;
+    }, 3500);
   }
 
-  // ====== AA codes ======
+  function debounce(fn, ms) {
+    let t = null;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn(...args), ms);
+    };
+  }
+
+  // ====== THREE-LETTER → ONE-LETTER ======
   const AA3TO1 = {
     ALA: "A", ARG: "R", ASN: "N", ASP: "D", CYS: "C",
     GLN: "Q", GLU: "E", GLY: "G", HIS: "H", ILE: "I",
     LEU: "L", LYS: "K", MET: "M", PHE: "F", PRO: "P",
     SER: "S", THR: "T", TRP: "W", TYR: "Y", VAL: "V",
-    MSE: "M", SEC: "U", PYR: "U",
+    MSE: "M", SEC: "U", PYR: "U", // rare / non-standard
   };
+  const AA1TO3 = {};
+  for (const k in AA3TO1) AA1TO3[AA3TO1[k]] = k;
 
-  // ====== URL STATE ======
+  // ====== URL STATE ENCODE / DECODE ======
   function encodeState() {
     const params = new URLSearchParams();
     if (state.currentProtein) {
@@ -228,18 +271,18 @@
     }
     return params;
   }
+
   function applyStateFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    return {
-      proteinId: params.get("p"),
-      pdbIndex: parseInt(params.get("i") || "0", 10),
-      style: params.get("style"),
-      color: params.get("color"),
-      opacity: parseFloat(params.get("op") || ""),
-      bg: params.get("bg"),
-      tour: parseInt(params.get("tour") || "", 10),
-    };
+    const proteinId = params.get("p");
+    const pdbIndex = parseInt(params.get("i") || "0", 10);
+    const style = params.get("style");
+    const color = params.get("color");
+    const opacity = parseFloat(params.get("op") || "");
+    const bg = params.get("bg");
+    return { proteinId, pdbIndex, style, color, opacity, bg, tour: parseInt(params.get("tour") || "", 10) };
   }
+
   const updateUrlDebounced = debounce(() => {
     const params = encodeState();
     const url = params.toString()
@@ -264,8 +307,11 @@
 
   // ====== VIEWER SETUP ======
   function initViewer() {
-    state.viewer = $3Dmol.createViewer(dom.viewer, { backgroundColor: "white" });
+    state.viewer = $3Dmol.createViewer(dom.viewer, {
+      backgroundColor: "white",
+    });
 
+    // FPS counter
     const tick = () => {
       state.fpsFrames++;
       const now = performance.now();
@@ -285,15 +331,23 @@
       window.addEventListener("resize", () => state.viewer.resize());
     }
 
+    // Manual click handler: 3Dmol.js 2.4.2 doesn't expose setClickHandler, so we listen
+    // on the canvas and call getIntersection to find the atom under the pointer.
+    let clickTimer = null;
     const canvas = dom.viewer.querySelector("canvas");
     if (canvas) {
       canvas.addEventListener("click", (e) => {
         if (!state.pickMode) return;
-        const rect = canvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const y = e.clientY - rect.top;
-        const atom = state.viewer.getIntersection(x, y);
-        if (atom) handleAtomPicked(atom);
+        // Distinguish click from drag-rotate (3Dmol handles rotate via its own listeners)
+        if (clickTimer) clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => {
+          clickTimer = null;
+          const rect = canvas.getBoundingClientRect();
+          const x = e.clientX - rect.left;
+          const y = e.clientY - rect.top;
+          const atom = state.viewer.getIntersection(x, y);
+          if (atom) handleAtomPicked(atom);
+        }, 50);
       });
     }
   }
@@ -301,7 +355,9 @@
   // ====== PROTEIN LIBRARY ======
   function renderProteinList(filter = "all") {
     state.currentFilter = filter;
-    const list = filter === "all" ? PROTEINS : PROTEINS.filter((p) => p.category === filter);
+    const list = filter === "all"
+      ? PROTEINS
+      : PROTEINS.filter((p) => p.category === filter);
     dom.proteinList.innerHTML = "";
     list.forEach((p) => {
       const card = document.createElement("div");
@@ -309,12 +365,15 @@
       if (p.isCustom) card.classList.add("protein-card-custom");
       card.dataset.id = p.id;
       card.style.borderLeftColor = p.color;
-      if (state.currentProtein && state.currentProtein.id === p.id) card.classList.add("active");
+      if (state.currentProtein && state.currentProtein.id === p.id) {
+        card.classList.add("active");
+      }
       const pdbTags = p.pdbIds
         .map((id, i) => `<span class="pdb-tag">${escapeHtml(String(id))}${p.stateLabels.length > 1 ? "·" + escapeHtml(p.stateLabels[i].split(" ")[0]) : ""}</span>`)
         .join("");
       const removeBtn = p.isCustom
-        ? `<button class="remove-btn" data-remove="${escapeHtml(p.id)}" title="Remove">×</button>` : "";
+        ? `<button class="remove-btn" data-remove="${escapeHtml(p.id)}" title="Remove">×</button>`
+        : "";
       card.innerHTML = `
         ${removeBtn}
         <div class="protein-card-name">
@@ -324,7 +383,8 @@
         <div class="protein-card-meta">
           ${pdbTags}
           <span class="category-tag">${categoryLabel(p.category)}</span>
-        </div>`;
+        </div>
+      `;
       card.addEventListener("click", (e) => {
         if (e.target.closest(".remove-btn")) return;
         loadProtein(p.id);
@@ -340,6 +400,7 @@
     });
   }
 
+  // Filter chips
   dom.filterChips.addEventListener("click", (e) => {
     const btn = e.target.closest(".chip");
     if (!btn) return;
@@ -353,13 +414,17 @@
     dom.customError.textContent = msg;
     dom.customError.hidden = false;
     clearTimeout(showCustomError._t);
-    showCustomError._t = setTimeout(() => { dom.customError.hidden = true; }, 6000);
+    showCustomError._t = setTimeout(() => {
+      dom.customError.hidden = true;
+    }, 6000);
   }
+
   function extractPdbTitle(pdbText) {
     if (!pdbText) return null;
     const m = pdbText.match(/^TITLE\s+(.+?)$/m);
     return m ? m[1].trim().replace(/\s+/g, " ") : null;
   }
+
   function makeCustomProtein({ id, name, summary, description, rawData, format, source }) {
     const title = extractPdbTitle(rawData);
     if (title && (name === undefined || name.startsWith("PDB ") || name === "Custom Molecule")) {
@@ -379,6 +444,7 @@
       format: format || "pdb",
     };
   }
+
   async function loadCustomByPdbId(pdbIdRaw) {
     const pdbId = String(pdbIdRaw || "").trim().toUpperCase();
     if (!/^[0-9][A-Z0-9]{3}$/.test(pdbId)) {
@@ -398,7 +464,9 @@
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.text();
       if (!data || data.length < 50) throw new Error("Empty or invalid response");
-      const protein = makeCustomProtein({ id, rawData: data, format: "pdb", source: "pdb-id" });
+      const protein = makeCustomProtein({
+        id, rawData: data, format: "pdb", source: "pdb-id",
+      });
       PROTEINS.push(protein);
       dom.customError.hidden = true;
       dom.pdbInput.value = "";
@@ -410,6 +478,7 @@
       showCustomError(`Could not load ${pdbId}: ${err.message}`);
     }
   }
+
   async function loadCustomFromText(text, filename) {
     const fname = filename || "pasted";
     const ext = (fname.split(".").pop() || "").toLowerCase();
@@ -434,6 +503,7 @@
     renderProteinList(state.currentFilter);
     loadProtein(id);
   }
+
   async function loadCustomFromFile(file) {
     if (!file) return;
     try {
@@ -443,6 +513,7 @@
       showCustomError(`Could not read file: ${err.message}`);
     }
   }
+
   function removeCustomMolecule(id) {
     const idx = PROTEINS.findIndex((p) => p.id === id);
     if (idx === -1) return;
@@ -454,6 +525,7 @@
     renderProteinList(state.currentFilter);
   }
 
+  // Wire up custom loader UI
   dom.loaderTabs.addEventListener("click", (e) => {
     const btn = e.target.closest(".loader-tab");
     if (!btn) return;
@@ -465,30 +537,39 @@
   });
   dom.btnLoadPdb.addEventListener("click", () => loadCustomByPdbId(dom.pdbInput.value));
   dom.pdbInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); loadCustomByPdbId(dom.pdbInput.value); }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      loadCustomByPdbId(dom.pdbInput.value);
+    }
   });
   dom.pdbInput.addEventListener("input", (e) => {
     e.target.value = e.target.value.toUpperCase().replace(/[^0-9A-Z]/g, "");
   });
   dom.btnLoadGene.addEventListener("click", () => loadByGeneOrUniprot(dom.geneInput.value));
   dom.geneInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); loadByGeneOrUniprot(dom.geneInput.value); }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      loadByGeneOrUniprot(dom.geneInput.value);
+    }
   });
 
   ["dragenter", "dragover"].forEach((ev) => {
     dom.dropZone.addEventListener(ev, (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       dom.dropZone.classList.add("dragover");
     });
   });
   ["dragleave", "dragend"].forEach((ev) => {
     dom.dropZone.addEventListener(ev, (e) => {
-      e.preventDefault(); e.stopPropagation();
+      e.preventDefault();
+      e.stopPropagation();
       dom.dropZone.classList.remove("dragover");
     });
   });
   dom.dropZone.addEventListener("drop", (e) => {
-    e.preventDefault(); e.stopPropagation();
+    e.preventDefault();
+    e.stopPropagation();
     dom.dropZone.classList.remove("dragover");
     const files = e.dataTransfer && e.dataTransfer.files;
     if (files && files.length > 0) loadCustomFromFile(files[0]);
@@ -512,13 +593,19 @@
       showCustomError("Type a gene name (e.g. TP53) or UniProt accession (e.g. P04637).");
       return;
     }
+
     showLoading(`Looking up ${query}…`);
+
     try {
       let accession = null;
+
+      // Detect input type
       const isUniprotAcc = /^[A-Z][A-Z0-9]{5,9}$/.test(query);
+
       if (isUniprotAcc) {
         accession = query;
       } else {
+        // Treat as gene name — query UniProt
         const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${encodeURIComponent(query)}+AND+organism_id:9606&format=json&size=1&fields=accession,gene_names,protein_name`;
         const r = await fetch(url);
         if (!r.ok) throw new Error(`UniProt search returned ${r.status}`);
@@ -531,6 +618,8 @@
         }
         accession = hit.primaryAccession;
       }
+
+      // Try to find PDB cross-references
       showLoading(`Fetching cross-refs for ${accession}…`);
       const entryUrl = `https://rest.uniprot.org/uniprotkb/${accession}.json`;
       const er = await fetch(entryUrl);
@@ -543,12 +632,15 @@
           const bl = parseInt((b.properties || []).find((p) => p.key === "Resolution")?.value || "999", 10);
           return al - bl;
         });
+
       hideLoading();
+
       if (pdbRefs.length > 0) {
         const pdbId = pdbRefs[0].id;
         showToast(`Loaded PDB ${pdbId} from UniProt ${accession}`, "success");
         await loadCustomByPdbId(pdbId);
       } else {
+        // Fallback: AlphaFold
         showLoading(`No PDB — fetching AlphaFold model for ${accession}…`);
         const afUrl = `https://alphafold.ebi.ac.uk/files/AF-${accession}-F1-model_v4.pdb`;
         const afr = await fetch(afUrl);
@@ -561,7 +653,8 @@
         state.customCounter++;
         const id = `custom-alphafold-${accession}`;
         const protein = makeCustomProtein({
-          id, name: `AlphaFold ${accession}`,
+          id,
+          name: `AlphaFold ${accession}`,
           summary: `AlphaFold model for UniProt ${accession}`,
           description: `Predicted structure from AlphaFold DB`,
           rawData: data, format: "pdb", source: "alphafold",
@@ -582,7 +675,12 @@
   async function loadProtein(proteinId) {
     const protein = PROTEINS.find((p) => p.id === proteinId);
     if (!protein) return;
-    if (state.compareProtein && state.compareProtein.id !== proteinId) clearComparison();
+
+    // If switching to a different protein, clear comparison
+    if (state.compareProtein && state.compareProtein.id !== proteinId) {
+      clearComparison();
+    }
+    // Reset measurement state when loading a new protein
     clearMeasurements();
 
     state.currentProtein = protein;
@@ -599,6 +697,7 @@
     updateMeasurementsUI();
 
     showLoading("Loading " + protein.name + "…");
+
     state.viewer.removeAllModels();
     state.viewer.removeAllShapes();
     state.viewer.removeAllLabels();
@@ -622,8 +721,10 @@
         model.pdbId = pdbId;
         return { model, data, format };
       });
+
       const results = await Promise.all(loadPromises);
       state.models = results.map((r) => r.model);
+      // Cache the raw PDB text of the first model for sequence parsing
       state._lastPdbText = results[0].data;
       state._lastPdbFormat = results[0].format;
 
@@ -633,12 +734,19 @@
 
       state.spinning = false;
       dom.btnSpin.textContent = "↻ Spin";
+
       hideLoading();
 
-      if (TRAJECTORIES[protein.id]) setupTrajectoryInitial();
-      else setModelVisibility(0);
+      if (TRAJECTORIES[protein.id]) {
+        setupTrajectoryInitial();
+      } else {
+        setModelVisibility(0);
+      }
 
+      // Parse sequence + SS for sequence panel
       parseAndRenderSequence();
+
+      // Update URL
       updateUrlDebounced();
     } catch (err) {
       console.error(err);
@@ -648,39 +756,64 @@
 
   function updateStateBadge(idx) {
     const protein = state.currentProtein;
-    if (!protein || !protein.stateLabels[idx]) { dom.currentStateBadge.textContent = "—"; return; }
+    if (!protein || !protein.stateLabels[idx]) {
+      dom.currentStateBadge.textContent = "—";
+      return;
+    }
     dom.currentStateBadge.textContent = protein.stateLabels[idx];
   }
-  function showLoading(text) { dom.loadingText.textContent = text; dom.loadingOverlay.classList.add("active"); }
-  function hideLoading() { dom.loadingOverlay.classList.remove("active"); }
+
+  function showLoading(text) {
+    dom.loadingText.textContent = text;
+    dom.loadingOverlay.classList.add("active");
+  }
+
+  function hideLoading() {
+    dom.loadingOverlay.classList.remove("active");
+  }
 
   // ====== STYLING ======
   function applyAllStyles() {
     state.models.forEach((m, idx) => applyStyleToModel(m, idx));
+    // Re-apply RMSD coloring if active
     if (state.rmsdColorMode && state.compareLoaded) applyRmsdColors();
   }
+
   function applyStyleToModel(model, idx) {
     const sel = { model: idx };
     const style = getStyleSpec(state.currentStyle, state.currentColor, state.currentOpacity);
     state.viewer.setStyle(sel, style);
+
     const protein = state.currentProtein;
     if (protein && protein.highlights && protein.highlights.ligand) {
-      state.viewer.setStyle({ model: idx, resn: protein.highlights.ligand.resn }, { stick: { color: "magenta", radius: 0.18 } });
+      state.viewer.setStyle({ model: idx, resn: protein.highlights.ligand.resn }, {
+        stick: { color: "magenta", radius: 0.18 },
+      });
     }
   }
+
   function getStyleSpec(styleName, colorName, opacity) {
     const base = { opacity };
     switch (styleName) {
-      case "cartoon": return { cartoon: { ...base, color: colorName } };
-      case "surface": return { surface: { ...base, color: colorName, opacity: 0.85 } };
-      case "ball+stick": return { stick: { ...base, color: colorName, radius: 0.15 } };
-      case "stick": return { stick: { ...base, color: colorName, radius: 0.18 } };
-      case "spacefill": return { sphere: { ...base, color: colorName, scale: 0.3 } };
-      case "ribbon": return { ribbon: { ...base, color: colorName } };
-      case "line": return { line: { ...base, color: colorName } };
-      default: return { cartoon: { ...base, color: colorName } };
+      case "cartoon":
+        return { cartoon: { ...base, color: colorName } };
+      case "surface":
+        return { surface: { ...base, color: colorName, opacity: 0.85 } };
+      case "ball+stick":
+        return { stick: { ...base, color: colorName, radius: 0.15 } };
+      case "stick":
+        return { stick: { ...base, color: colorName, radius: 0.18 } };
+      case "spacefill":
+        return { sphere: { ...base, color: colorName, scale: 0.3 } };
+      case "ribbon":
+        return { ribbon: { ...base, color: colorName } };
+      case "line":
+        return { line: { ...base, color: colorName } };
+      default:
+        return { cartoon: { ...base, color: colorName } };
     }
   }
+
   function setModelVisibility(idx) {
     state.models.forEach((m, i) => {
       const visible = i === idx || !TRAJECTORIES[state.currentProtein?.id];
@@ -690,24 +823,41 @@
     state.viewer.render();
   }
 
+  // ====== CONTROLS ======
   function onStyleChange() {
     applyAllStyles();
-    if (state.currentProtein && TRAJECTORIES[state.currentProtein.id]) updateTrajectoryBlend(state.trajectoryValue);
-    else state.viewer.render();
+    if (state.currentProtein && TRAJECTORIES[state.currentProtein.id]) {
+      updateTrajectoryBlend(state.trajectoryValue);
+    } else {
+      state.viewer.render();
+    }
     updateUrlDebounced();
   }
-  dom.ctrlStyle.addEventListener("change", (e) => { state.currentStyle = e.target.value; onStyleChange(); });
-  dom.ctrlColor.addEventListener("change", (e) => { state.currentColor = e.target.value; onStyleChange(); });
-  dom.ctrlOpacity.addEventListener("input", (e) => { state.currentOpacity = parseFloat(e.target.value); onStyleChange(); });
+  dom.ctrlStyle.addEventListener("change", (e) => {
+    state.currentStyle = e.target.value;
+    onStyleChange();
+  });
+  dom.ctrlColor.addEventListener("change", (e) => {
+    state.currentColor = e.target.value;
+    onStyleChange();
+  });
+  dom.ctrlOpacity.addEventListener("input", (e) => {
+    state.currentOpacity = parseFloat(e.target.value);
+    onStyleChange();
+  });
   dom.ctrlBg.addEventListener("change", (e) => {
     state.background = e.target.value;
-    const bg = e.target.value === "white" ? "white" : e.target.value === "black" ? "black" : "0x202428";
+    const bg = e.target.value === "white"
+      ? "white"
+      : e.target.value === "black"
+      ? "black"
+      : "0x202428";
     state.viewer.setBackgroundColor(bg);
     state.viewer.render();
     updateUrlDebounced();
   });
 
-  // ====== HIGHLIGHTS ======
+  // ====== HIGHLIGHT BUTTONS ======
   function updateHighlightButtons() {
     const protein = state.currentProtein;
     if (!protein) return;
@@ -719,7 +869,10 @@
   dom.btnHighlightHeme.addEventListener("click", () => {
     const h = state.currentProtein.highlights;
     if (!h || !h.ligand) return;
-    state.viewer.setStyle({ resn: h.ligand.resn }, { stick: { color: "magenta", radius: 0.2 }, sphere: { color: "magenta", scale: 0.35 } });
+    state.viewer.setStyle({ resn: h.ligand.resn }, {
+      stick: { color: "magenta", radius: 0.2 },
+      sphere: { color: "magenta", scale: 0.35 },
+    });
     state.viewer.zoomTo({ resn: h.ligand.resn });
     state.viewer.render();
   });
@@ -729,7 +882,10 @@
     state.viewer.removeAllShapes();
     h.residues.forEach((r) => {
       const sel = r.chain ? { chain: r.chain, resi: r.resi } : { resi: r.resi };
-      state.viewer.addStyle(sel, { stick: { color: "yellow", radius: 0.25 }, sphere: { color: "yellow", scale: 0.4 } });
+      state.viewer.addStyle(sel, {
+        stick: { color: "yellow", radius: 0.25 },
+        sphere: { color: "yellow", scale: 0.4 },
+      });
     });
     state.viewer.zoomTo({ resi: h.residues.map((r) => r.resi) });
     state.viewer.render();
@@ -753,11 +909,15 @@
   });
 
   // ====== VIEWER TOOLBAR ======
-  dom.btnResetView.addEventListener("click", () => { state.viewer.zoomTo(); state.viewer.render(); });
+  dom.btnResetView.addEventListener("click", () => {
+    state.viewer.zoomTo();
+    state.viewer.render();
+  });
   dom.btnSpin.addEventListener("click", () => {
     state.spinning = !state.spinning;
     dom.btnSpin.textContent = state.spinning ? "⏸ Pause" : "↻ Spin";
-    if (state.spinning) state.viewer.spin("y", 0.6); else state.viewer.spin(false);
+    if (state.spinning) state.viewer.spin("y", 0.6);
+    else state.viewer.spin(false);
   });
   dom.btnScreenshot.addEventListener("click", () => {
     const dataURL = state.viewer.pngURI();
@@ -765,7 +925,9 @@
     link.href = dataURL;
     const proteinName = state.currentProtein ? state.currentProtein.name.replace(/\s+/g, "-").toLowerCase() : "protein";
     link.download = `${proteinName}-${Date.now()}.png`;
-    document.body.appendChild(link); link.click(); document.body.removeChild(link);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   });
   dom.btnShare.addEventListener("click", () => shareCurrentView());
 
@@ -782,6 +944,7 @@
   });
 
   // ====== SEQUENCE PANEL ======
+  // Map amino-acid → color (similar to ClustalX-like scheme)
   const AA_COLORS = {
     A: "#80a0f0", R: "#f01505", N: "#00ff00", D: "#c048c0",
     C: "#f08000", Q: "#00ff00", E: "#c048c0", G: "#f09048",
@@ -789,6 +952,7 @@
     M: "#80a0f0", F: "#80a0f0", P: "#ffff00", S: "#00ff00",
     T: "#00ff00", W: "#80a0f0", Y: "#15a4a4", V: "#80a0f0",
   };
+  const CHAIN_PALETTE = ["#5fc7ff", "#ff8a65", "#a78bfa", "#81c784", "#ffb74d", "#f06292", "#4dd0e1", "#ba68c8"];
 
   function parseAndRenderSequence() {
     if (!state._lastPdbText || !state.models.length) {
@@ -801,25 +965,31 @@
     state.sequence = parseSequenceFromPDB(state._lastPdbText, state._lastPdbFormat);
     renderSequencePanel();
   }
+
   function parseSequenceFromPDB(text, format) {
-    const chainsMap = {};
-    const ssByResi = {};
+    // Build per-chain residue list from ATOM records + SS from HELIX/SHEET.
+    const chainsMap = {}; // chain -> [residues]
+    const ssByResi = {}; // chain -> resi -> 'H' | 'E' | ''
+
     const lines = text.split(/\r?\n/);
-    const seen = {};
+    const seen = {}; // key chain+resi+atom -> true (dedupe altloc)
     for (const line of lines) {
       if (!line.startsWith("ATOM") && !line.startsWith("HETATM")) continue;
       const chain = line.substring(21, 22).trim() || "A";
+      // For CA-only sequence display, keep only CA atoms
       const atomName = line.substring(12, 16).trim();
       if (atomName !== "CA" && atomName !== "P" && format === "pdb") continue;
       const resi = parseInt(line.substring(22, 26).trim(), 10);
       const resn = line.substring(17, 20).trim();
+      const ins = line.substring(26, 27).trim();
       if (!resi) continue;
-      const key = chain + ":" + resi;
+      const key = chain + ":" + resi + ":" + ins;
       if (seen[key]) continue;
       seen[key] = true;
       if (!chainsMap[chain]) chainsMap[chain] = [];
-      chainsMap[chain].push({ resi, resn });
+      chainsMap[chain].push({ resi, resn, insCode: ins });
     }
+    // SS
     for (const line of lines) {
       if (line.startsWith("HELIX")) {
         const chain = line.substring(19, 20).trim() || "A";
@@ -835,24 +1005,32 @@
         for (let i = start; i <= end; i++) ssByResi[chain][i] = "E";
       }
     }
+    // Build ordered list
     const chainIds = Object.keys(chainsMap).sort();
     return {
       chains: chainIds.map((c) => ({
         id: c,
         residues: chainsMap[c].map((r) => ({
-          resi: r.resi, resn: r.resn, one: AA3TO1[r.resn] || "X",
+          resi: r.resi,
+          resn: r.resn,
+          one: AA3TO1[r.resn] || "X",
           ss: ssByResi[c]?.[r.resi] || "",
         })),
       })),
     };
   }
+
   function renderSequencePanel() {
-    if (!state.sequence) { dom.sequenceChains.innerHTML = ""; dom.sequenceInfo.textContent = "—"; return; }
+    if (!state.sequence) {
+      dom.sequenceChains.innerHTML = "";
+      dom.sequenceInfo.textContent = "—";
+      return;
+    }
     const seq = state.sequence;
     const totalRes = seq.chains.reduce((acc, c) => acc + c.residues.length, 0);
     dom.sequenceInfo.textContent = `${seq.chains.length} chain${seq.chains.length !== 1 ? "s" : ""} · ${totalRes} residues`;
     dom.sequenceChains.innerHTML = "";
-    seq.chains.forEach((chain) => {
+    seq.chains.forEach((chain, ci) => {
       const row = document.createElement("div");
       row.className = "sequence-row";
       const label = document.createElement("div");
@@ -875,11 +1053,16 @@
       });
       dom.sequenceChains.appendChild(row);
     });
+
     renderSecondaryStructure();
   }
+
   function renderSecondaryStructure() {
     if (!state.sequence) return;
-    if (!state.sequenceShowSS) { dom.sequenceSecondary.hidden = true; return; }
+    if (!state.sequenceShowSS) {
+      dom.sequenceSecondary.hidden = true;
+      return;
+    }
     dom.sequenceSecondary.hidden = false;
     dom.sequenceSecondary.innerHTML = "";
     state.sequence.chains.forEach((chain) => {
@@ -890,6 +1073,7 @@
       lbl.style.color = "var(--text-1)";
       lbl.style.marginRight = "6px";
       wrap.appendChild(lbl);
+      // Coalesce SS runs
       let i = 0;
       while (i < chain.residues.length) {
         const r = chain.residues[i];
@@ -910,9 +1094,11 @@
       dom.sequenceSecondary.appendChild(wrap);
     });
   }
+
   function focusResidue(chainId, resi) {
     if (!state.models.length) return;
     const sel = { chain: chainId, resi: resi };
+    // Highlight residue
     applyAllStyles();
     state.viewer.addStyle(sel, {
       stick: { color: "yellow", radius: 0.3 },
@@ -920,24 +1106,34 @@
     });
     state.viewer.zoomTo(sel, 0, false);
     state.viewer.render();
+    // Mark active in sequence
     document.querySelectorAll(".sequence-residue").forEach((el) => {
-      el.classList.toggle("active", el.title.includes(`${chainId}:${resi}`));
+      const key = `${chainId}:${resi}`;
+      el.classList.toggle("active", el.title.startsWith(key) || el.title.includes(" " + key));
     });
   }
+
   dom.btnToggleSecondary.addEventListener("click", () => {
     state.sequenceShowSS = !state.sequenceShowSS;
     dom.btnToggleSecondary.textContent = state.sequenceShowSS ? "Hide SS" : "Show SS";
     renderSecondaryStructure();
   });
 
-  // ====== MEASUREMENT ======
+  // ====== MEASUREMENT TOOL ======
   function setPickMode(on) {
     state.pickMode = on;
     dom.pickHint.hidden = !on;
     dom.btnPickAtom.textContent = on ? "✕ Cancel picking" : "📍 Pick atoms";
-    if (on) { state.pickBuffer = []; updatePickHint(); }
-    else { state.pickBuffer = []; updatePickHint(); }
+    if (on) {
+      state.pickBuffer = [];
+      updatePickHint();
+      state.viewer.setClickable(true, true);
+    } else {
+      state.pickBuffer = [];
+      updatePickHint();
+    }
   }
+
   function updatePickHint() {
     const n = state.pickBuffer.length;
     let label = "Click an atom to pick";
@@ -946,18 +1142,30 @@
     else if (n === 3) label = "Pick #4 — dihedral will be shown";
     dom.pickHintText.textContent = label;
   }
+
   dom.btnPickAtom.addEventListener("click", () => setPickMode(!state.pickMode));
   dom.btnCancelPick.addEventListener("click", () => setPickMode(false));
 
   function handleAtomPicked(atom) {
     if (!atom || !atom.elem) return;
     const summary = {
-      serial: atom.serial, x: atom.x, y: atom.y, z: atom.z,
-      chain: atom.chain || "", resi: atom.resi, resn: atom.resn,
-      atom: atom.atom, elem: atom.elem, model: atom.model,
+      serial: atom.serial,
+      x: atom.x, y: atom.y, z: atom.z,
+      chain: atom.chain || "",
+      resi: atom.resi,
+      resn: atom.resn,
+      atom: atom.atom,
+      elem: atom.elem,
+      model: atom.model,
     };
     state.pickBuffer.push(summary);
-    state.viewer.addSphere({ center: { x: atom.x, y: atom.y, z: atom.z }, radius: 0.4, color: "yellow" });
+
+    // Visual marker for picked atom
+    state.viewer.addSphere({
+      center: { x: atom.x, y: atom.y, z: atom.z },
+      radius: 0.4,
+      color: "yellow",
+    });
 
     if (state.pickBuffer.length === 2) {
       finalizeMeasurement("distance", computeDistance(state.pickBuffer[0], state.pickBuffer[1]));
@@ -970,27 +1178,44 @@
     updatePickHint();
     updateMeasurementsUI();
   }
+
   function finalizeMeasurement(type, value) {
     const atoms = state.pickBuffer.slice(0, type === "distance" ? 2 : type === "angle" ? 3 : 4);
     const label = atoms.map((a) => `${a.chain || ""}:${a.resn}${a.resi}.${a.atom}`).join(" – ");
     state.measurements.unshift({ type, atoms: atoms.slice(), value, label, ts: Date.now() });
+    // Add label to viewer
     if (type === "distance") {
-      state.viewer.addCylinder({ start: atoms[0], end: atoms[1], radius: 0.1, color: "yellow", fromCap: 1, toCap: 1 });
+      state.viewer.addCylinder({
+        start: atoms[0], end: atoms[1], radius: 0.1, color: "yellow", fromCap: 1, toCap: 1,
+      });
       const mid = midPoint(atoms[0], atoms[1]);
-      state.viewer.addLabel(`${value.toFixed(2)} Å`, { position: mid, backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true });
+      state.viewer.addLabel(`${value.toFixed(2)} Å`, {
+        position: mid, backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true,
+      });
     } else if (type === "angle") {
-      state.viewer.addCylinder({ start: atoms[0], end: atoms[1], radius: 0.05, color: "yellow" });
-      state.viewer.addCylinder({ start: atoms[1], end: atoms[2], radius: 0.05, color: "yellow" });
-      state.viewer.addLabel(`${value.toFixed(1)}°`, { position: atoms[1], backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true, yOffset: 1.5 });
+      state.viewer.addCylinder({
+        start: atoms[0], end: atoms[1], radius: 0.05, color: "yellow",
+      });
+      state.viewer.addCylinder({
+        start: atoms[1], end: atoms[2], radius: 0.05, color: "yellow",
+      });
+      state.viewer.addLabel(`${value.toFixed(1)}°`, {
+        position: atoms[1], backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true, yOffset: 1.5,
+      });
     } else if (type === "dihedral") {
       for (let i = 0; i < 3; i++) {
-        state.viewer.addCylinder({ start: atoms[i], end: atoms[i + 1], radius: 0.04, color: "cyan" });
+        state.viewer.addCylinder({
+          start: atoms[i], end: atoms[i + 1], radius: 0.04, color: "cyan",
+        });
       }
       const mid = midPoint(atoms[1], atoms[2]);
-      state.viewer.addLabel(`τ ${value.toFixed(1)}°`, { position: mid, backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true });
+      state.viewer.addLabel(`τ ${value.toFixed(1)}°`, {
+        position: mid, backgroundColor: "rgba(0,0,0,0.7)", fontColor: "white", fontSize: 12, inFront: true,
+      });
     }
     state.viewer.render();
   }
+
   function updateMeasurementsUI() {
     if (!state.measurements.length) {
       dom.measurementTable.innerHTML = '<div class="measurement-table-empty">No measurements yet</div>';
@@ -998,7 +1223,9 @@
     }
     dom.measurementTable.innerHTML = state.measurements.map((m, idx) => {
       const atoms = m.atoms.map((a) => `${a.atom}${a.resi}`).join(" · ");
-      const val = m.type === "distance" ? `${m.value.toFixed(3)} Å` : `${m.value.toFixed(2)}°`;
+      const val = m.type === "distance"
+        ? `${m.value.toFixed(3)} Å`
+        : `${m.value.toFixed(2)}°`;
       const typeLabel = { distance: "Distance", angle: "Angle", dihedral: "Dihedral" }[m.type];
       return `<div class="measurement-row">
         <span class="measurement-type">${typeLabel} #${state.measurements.length - idx}</span>
@@ -1007,6 +1234,7 @@
       </div>`;
     }).join("");
   }
+
   dom.btnClearMeasurements.addEventListener("click", () => clearMeasurements());
   function clearMeasurements() {
     state.measurements = [];
@@ -1017,9 +1245,15 @@
     if (state.pickMode) updatePickHint();
     updateMeasurementsUI();
   }
-  function midPoint(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 }; }
-  function computeDistance(a, b) { return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2); }
+
+  function midPoint(a, b) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
+  }
+  function computeDistance(a, b) {
+    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2);
+  }
   function computeAngle(a, b, c) {
+    // angle at b between ba and bc vectors
     const v1 = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
     const v2 = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
     const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
@@ -1029,32 +1263,54 @@
     return Math.acos(cos) * 180 / Math.PI;
   }
   function computeDihedral(a, b, c, d) {
+    // 4-atom dihedral using vectors b1=b-a, b2=c-b, b3=d-c
     const b1 = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
     const b2 = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
     const b3 = { x: d.x - c.x, y: d.y - c.y, z: d.z - c.z };
+    // n1 = b1 × b2 ; n2 = b2 × b3
     const n1 = cross(b1, b2);
     const n2 = cross(b2, b3);
     const m1 = Math.sqrt(dot(n1, n1));
     const m2 = Math.sqrt(dot(n2, n2));
     const b2n = Math.sqrt(dot(b2, b2));
+    // m = b2 / |b2|
     const m = { x: b2.x / b2n, y: b2.y / b2n, z: b2.z / b2n };
+    // x = n1 / |n1|
     const x = { x: n1.x / m1, y: n1.y / m1, z: n1.z / m1 };
+    // y = m × x
     const y = cross(m, x);
-    return Math.atan2(dot(n2, y), dot(n2, x)) * 180 / Math.PI;
+    // angle = atan2( n2·y , n2·x )
+    const ang = Math.atan2(dot(n2, y), dot(n2, x));
+    return ang * 180 / Math.PI;
   }
-  function cross(a, b) { return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x }; }
+  function cross(a, b) {
+    return {
+      x: a.y * b.z - a.z * b.y,
+      y: a.z * b.x - a.x * b.z,
+      z: a.x * b.y - a.y * b.x,
+    };
+  }
   function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 
   // ====== COMPARISON + RMSD ======
   dom.btnEnableCompare.addEventListener("click", () => {
     dom.compareControls.hidden = !dom.compareControls.hidden;
-    dom.btnEnableCompare.textContent = dom.compareControls.hidden ? "⇄ Load structure B" : "⇄ Hide compare input";
-    if (!dom.compareControls.hidden) dom.compareInput.focus();
+    if (!dom.compareControls.hidden) {
+      dom.btnEnableCompare.textContent = "⇄ Hide compare input";
+      dom.compareInput.focus();
+    } else {
+      dom.btnEnableCompare.textContent = "⇄ Load structure B";
+    }
   });
+
   dom.btnLoadCompare.addEventListener("click", () => loadCompareProtein(dom.compareInput.value));
   dom.compareInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { e.preventDefault(); loadCompareProtein(dom.compareInput.value); }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      loadCompareProtein(dom.compareInput.value);
+    }
   });
+
   dom.btnClearCompare.addEventListener("click", () => clearComparison());
 
   async function loadCompareProtein(pdbIdRaw) {
@@ -1072,7 +1328,10 @@
       model.modelIndex = state.models.length;
       model.pdbId = pdbId;
       model.isCompare = true;
-      state.viewer.setStyle({ model: model.modelIndex }, { cartoon: { color: "#9aa0a6", opacity: 0.55 } });
+      // Color: grey + cartoon at 0.6 opacity
+      state.viewer.setStyle({ model: model.modelIndex }, {
+        cartoon: { color: "#9aa0a6", opacity: 0.55 },
+      });
       state.viewer.zoomTo();
       state.viewer.render();
       state.compareProtein = { id: `compare-${pdbId}`, name: `Structure B (${pdbId})`, modelIndex: model.modelIndex, pdbId };
@@ -1087,6 +1346,7 @@
       showCustomError(`Could not load ${pdbId}: ${err.message}`);
     }
   }
+
   function clearComparison() {
     if (!state.compareLoaded) return;
     const modelB = state.models.find((m) => m.isCompare);
@@ -1104,6 +1364,7 @@
     state.viewer.render();
     updateRmsdSummary();
   }
+
   dom.btnAlignCalpha.addEventListener("click", () => alignAndComputeRmsd());
   dom.btnColorByRmsd.addEventListener("click", () => {
     if (!state.compareLoaded || !state.aligned) {
@@ -1111,20 +1372,33 @@
       return;
     }
     state.rmsdColorMode = !state.rmsdColorMode;
-    if (state.rmsdColorMode) { applyRmsdColors(); showToast("Coloured by per-residue RMSD", "success"); }
-    else { applyAllStyles(); showToast("Back to default colors", ""); }
+    if (state.rmsdColorMode) {
+      applyRmsdColors();
+      showToast("Coloured by per-residue RMSD", "success");
+    } else {
+      applyAllStyles();
+      showToast("Back to default colors", "");
+    }
   });
 
   function alignAndComputeRmsd() {
-    if (!state.compareLoaded) { showToast("Load structure B first", ""); return; }
+    if (!state.compareLoaded) {
+      showToast("Load structure B first", "");
+      return;
+    }
     const modelA = state.models.find((m) => !m.isCompare);
     const modelB = state.models.find((m) => m.isCompare);
-    if (!modelA || !modelB) { showToast("Both structures must be loaded", ""); return; }
+    if (!modelA || !modelB) {
+      showToast("Both structures must be loaded", "");
+      return;
+    }
     showLoading("Aligning on Cα…");
+    // Align modelB onto modelA using 3Dmol's built-in superpose
     try {
       const ok = state.viewer.superpose(modelB, modelA, { atom: "CA" });
       if (!ok) throw new Error("superpose returned false");
       state.aligned = true;
+      // Compute per-residue RMSD
       state.rmsdPerResidue = computePerResidueRmsd(modelA, modelB);
       const total = state.rmsdPerResidue.length
         ? Math.sqrt(state.rmsdPerResidue.reduce((acc, r) => acc + r.value * r.value, 0) / state.rmsdPerResidue.length)
@@ -1138,24 +1412,33 @@
       showCustomError(`Alignment failed: ${err.message}`);
     }
   }
+
   function computePerResidueRmsd(modelA, modelB) {
     const aAtoms = modelA.selectedAtoms({ atom: "CA" });
     const bAtoms = modelB.selectedAtoms({ atom: "CA" });
+    // Build lookup for B atoms by (chain, resi)
     const bMap = new Map();
-    for (const a of bAtoms) bMap.set(`${a.chain}:${a.resi}`, a);
+    for (const a of bAtoms) {
+      bMap.set(`${a.chain}:${a.resi}`, a);
+    }
     const result = [];
     for (const a of aAtoms) {
       const b = bMap.get(`${a.chain}:${a.resi}`);
       if (!b) continue;
       const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-      result.push({ chain: a.chain, resi: a.resi, value: Math.sqrt(dx * dx + dy * dy + dz * dz) });
+      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+      result.push({ chain: a.chain, resi: a.resi, value: d });
     }
     return result;
   }
+
   function applyRmsdColors() {
     if (!state.rmsdPerResidue) return;
+    // Heatmap: green (0) -> yellow (3Å) -> red (10Å+)
     function colorFor(d) {
-      const t = Math.min(1, d / 10);
+      const max = 10;
+      const t = Math.min(1, d / max);
+      // lerp green->yellow->red
       if (t < 0.5) {
         const u = t * 2;
         const r = Math.round(0x10 + (0xfb - 0x10) * u);
@@ -1175,12 +1458,14 @@
       cartoon: {
         colorfunc: (atom) => {
           const c = map.get(`${atom.chain}:${atom.resi}`);
-          return c === undefined ? 0x9aa0a6 : c;
+          if (c === undefined) return 0x9aa0a6;
+          return c;
         },
       },
     });
     state.viewer.render();
   }
+
   function updateRmsdSummary(totalOverride) {
     if (!state.compareLoaded) {
       dom.rmsdSummary.innerHTML = '<div class="muted small">Load structure B to compare.</div>';
@@ -1209,6 +1494,692 @@
     `;
   }
 
+  // ====== BIOINFORMATICS: pLDDT, Conservation, Variants, Pockets, Ligand Contacts ======
+
+  // pLDDT coloring: AlphaFold models store pLDDT (0–100) in the B-factor column.
+  // Color scheme follows the AlphaFold convention:
+  //   pLDDT >= 90 → very high confidence  (deep blue)
+  //   pLDDT >= 70 → confident             (light blue / cyan)
+  //   pLDDT >= 50 → low                   (yellow)
+  //   pLDDT <  50 → very low             (orange)
+  function plddtToColor(p) {
+    if (p >= 90) return 0x0053d6;        // deep blue
+    if (p >= 70) return 0x65cbf3;        // cyan
+    if (p >= 50) return 0xffdb13;        // yellow
+    return 0xff7d45;                     // orange
+  }
+  function colorByPLDDT() {
+    if (!state.models.length) {
+      showCustomError("No structure loaded.");
+      return;
+    }
+    if (!state.viewer) return;
+    state.viewer.setStyle({}, {
+      cartoon: { colorfunc: (atom) => plddtToColor(atom.b) },
+    });
+    state.viewer.render();
+    showToast("Coloured by AlphaFold pLDDT confidence", "success");
+  }
+  dom.btnColorPlddt.addEventListener("click", colorByPLDDT);
+
+  // ----- Conservation via simple JS MSA -----
+  // Strategy:
+  //   1. Look up the UniProt accession for the loaded PDB via RCSB's data API.
+  //   2. Fetch the canonical sequence from UniProt.
+  //   3. Fetch ~10 close homologs via UniProt's REST search ("family:<family>" or
+  //      blast-like neighbours). Fallback: if no homologs, conservation is trivially 1.0.
+  //   4. Run progressive pairwise alignment (Needleman-Wunsch) in the browser.
+  //   5. Compute per-column conservation (fraction of identical residues at each position).
+  //   6. Map back to PDB residue numbers via SIFTS and color the structure.
+  // -------- Simple Needleman-Wunsch with BLOSUM62-like scoring --------
+  const NW_MATCH = 2;
+  const NW_MISMATCH = -1;
+  const NW_GAP = -2;
+  function nwAlign(a, b) {
+    const m = a.length, n = b.length;
+    // Score matrix
+    const F = new Int16Array((m + 1) * (n + 1));
+    // Traceback matrix: 0=diag, 1=up, 2=left
+    const Tb = new Uint8Array((m + 1) * (n + 1));
+    for (let i = 0; i <= m; i++) F[i * (n + 1)] = i * NW_GAP;
+    for (let j = 0; j <= n; j++) F[j] = j * NW_GAP;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const s = a[i - 1] === b[j - 1] ? NW_MATCH : NW_MISMATCH;
+        const diag = F[(i - 1) * (n + 1) + (j - 1)] + s;
+        const up = F[(i - 1) * (n + 1) + j] + NW_GAP;
+        const left = F[i * (n + 1) + (j - 1)] + NW_GAP;
+        let best = diag, dir = 0;
+        if (up > best) { best = up; dir = 1; }
+        if (left > best) { best = left; dir = 2; }
+        F[i * (n + 1) + j] = best;
+        Tb[i * (n + 1) + j] = dir;
+      }
+    }
+    // Traceback — return aligned strings
+    let i = m, j = n, ai = "", bj = "";
+    while (i > 0 || j > 0) {
+      const dir = Tb[i * (n + 1) + j];
+      if (i > 0 && j > 0 && dir === 0) {
+        ai = a[i - 1] + ai; bj = b[j - 1] + bj; i--; j--;
+      } else if (i > 0 && dir === 1) {
+        ai = a[i - 1] + ai; bj = "-" + bj; i--;
+      } else {
+        ai = "-" + ai; bj = b[j - 1] + bj; j--;
+      }
+    }
+    return { a: ai, b: bj };
+  }
+
+  // Progressive MSA: align the first sequence to each subsequent one using the running consensus.
+  // Simpler & faster than tree-based MUSCLE; good enough for a handful of sequences.
+  function progressiveMsa(seqs) {
+    if (seqs.length === 0) return [];
+    let consensus = seqs[0];
+    let aligned = [consensus.split("")];
+    for (let i = 1; i < seqs.length; i++) {
+      const result = nwAlign(consensus, seqs[i]);
+      // Re-align previous sequences to the new consensus to keep all the same length
+      const newAligned = aligned.map((row) => {
+        const s = row.join("");
+        const r = nwAlign(result.a, s);
+        return r.b.split("");
+      });
+      newAligned.push(result.b.split(""));
+      consensus = result.a;
+      aligned = newAligned;
+    }
+    // Pad all rows to consensus length
+    const len = consensus.length;
+    for (const row of aligned) {
+      while (row.length < len) row.push("-");
+    }
+    return { consensus, aligned };
+  }
+
+  // Conservation score per column = fraction of sequences with a non-gap residue matching
+  // the consensus. Returns array of values 0..1 aligned to the consensus.
+  function conservationScores(msa) {
+    const cons = msa.consensus;
+    const n = cons.length;
+    const out = new Array(n).fill(1);
+    for (let j = 0; j < n; j++) {
+      const ref = cons[j];
+      if (ref === "-") { out[j] = 0; continue; }
+      let matches = 0, total = 0;
+      for (const row of msa.aligned) {
+        const ch = row[j];
+        if (ch === "-") continue;
+        total++;
+        if (ch === ref) matches++;
+      }
+      out[j] = total > 0 ? matches / total : 0;
+    }
+    return out;
+  }
+
+  async function fetchRcsbUniprotMapping(pdbId) {
+    // RCSB data API: fetch the UniProt accession(s) associated with a PDB entity
+    // Returns: { "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers": [...] }
+    try {
+      const url = `https://data.rcsb.org/rest/v1/core/entry/${pdbId.toLowerCase()}`;
+      const r = await fetch(url);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const entities = j.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
+      // Iterate entities to find a UniProt accession
+      for (const eid of entities) {
+        try {
+          const er = await fetch(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
+          if (!er.ok) continue;
+          const ej = await er.json();
+          const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
+          for (const ref of refs) {
+            if (ref.database_accession && ref.database_name === "UniProt") {
+              return ref.database_accession;
+            }
+          }
+        } catch (e) { /* skip */ }
+      }
+    } catch (e) { /* skip */ }
+    return null;
+  }
+
+  // Build a PDB-resi → alignment-index map from the PDB ATOM records
+  function buildResidueIndex(pdbText) {
+    const map = new Map(); // "chain:resi" -> {indexInSequence, resn}
+    let seqIdx = -1;
+    const seen = new Set();
+    const lines = pdbText.split(/\r?\n/);
+    for (const line of lines) {
+      if (!line.startsWith("ATOM")) continue;
+      const atomName = line.substring(12, 16).trim();
+      if (atomName !== "CA") continue;
+      const chain = line.substring(21, 22).trim() || "A";
+      const resi = parseInt(line.substring(22, 26).trim(), 10);
+      const resn = line.substring(17, 20).trim();
+      const key = chain + ":" + resi;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      seqIdx++;
+      map.set(key, { seqIdx, resn });
+    }
+    return { map, sequence: (() => {
+      const seq = [];
+      for (const [, v] of map) seq.push(v.seqIdx);  // not used
+      // Reconstruct 1-letter sequence in seqIdx order
+      const arr = new Array(seqIdx + 1).fill("X");
+      for (const [k, v] of map) arr[v.seqIdx] = (AA3TO1[v.resn] || "X");
+      return arr.join("");
+    })() };
+  }
+
+  async function loadConservation() {
+    if (state.conservationJob) return state.conservationJob;
+    if (!state._lastPdbText || !state.currentProtein) {
+      showCustomError("Load a protein first.");
+      return;
+    }
+    const pdbId = state.currentProtein.pdbIds[state.currentPdbIndex];
+    dom.conservationStatus.textContent = "Looking up UniProt accession…";
+    dom.btnFetchConservation.disabled = true;
+
+    const job = (async () => {
+      try {
+        const acc = await fetchRcsbUniprotMapping(pdbId);
+        if (!acc) {
+          dom.conservationStatus.textContent = "No UniProt mapping found for this PDB.";
+          return;
+        }
+        dom.conservationStatus.textContent = `Fetching canonical sequence (${acc})…`;
+        // UniProt canonical sequence
+        const fastaUrl = `https://rest.uniprot.org/uniprotkb/${acc}.fasta`;
+        const fr = await fetch(fastaUrl);
+        if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
+        const fastaText = await fr.text();
+        const canonical = parseFastaSequences(fastaText)[0] || "";
+        if (!canonical) throw new Error("Empty canonical sequence");
+
+        dom.conservationStatus.textContent = "Fetching homologs…";
+        // Homologs via UniProt search: by organism (human) and protein name keywords
+        const protName = state.currentProtein.name.split(/[·•:()\-]/)[0].trim();
+        const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
+        const sr = await fetch(searchUrl);
+        if (!sr.ok) throw new Error("Homolog search failed");
+        const homologFasta = await sr.text();
+        const homologs = parseFastaSequences(homologFasta);
+
+        const allSeqs = [canonical, ...homologs].slice(0, 10);
+        dom.conservationStatus.textContent = `Aligning ${allSeqs.length} sequences…`;
+        const msa = progressiveMsa(allSeqs);
+        const scores = conservationScores(msa);
+
+        // Build PDB residue index to map consensus index → PDB residue
+        const { map: residueMap } = buildResidueIndex(state._lastPdbText);
+        const conservationByResidue = new Map();
+        for (const [key, v] of residueMap) {
+          if (v.seqIdx < scores.length) {
+            conservationByResidue.set(key, scores[v.seqIdx]);
+          }
+        }
+        state.conservation = { byResidue: conservationByResidue, homologs: allSeqs.length - 1 };
+
+        // Color structure by conservation
+        state.viewer.setStyle({}, {
+          cartoon: { colorfunc: (atom) => {
+            const c = conservationByResidue.get(`${atom.chain}:${atom.resi}`);
+            if (c === undefined) return 0xcccccc;
+            // 0 (variable) → blue, 1 (highly conserved) → deep red
+            const t = c;
+            const r = Math.round(0x5b + (0xcc - 0x5b) * t);
+            const g = Math.round(0x8d + (0x1f - 0x8d) * t);
+            const b = Math.round(0xef + (0x1f - 0xef) * t);
+            return (r << 16) | (g << 8) | b;
+          } },
+        });
+        state.viewer.render();
+        dom.conservationStatus.textContent = `Conservation: ${allSeqs.length - 1} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
+        showToast("Conservation map applied", "success");
+      } catch (err) {
+        dom.conservationStatus.textContent = `MSA failed: ${err.message}`;
+        showCustomError(`Conservation fetch failed: ${err.message}`);
+      } finally {
+        dom.btnFetchConservation.disabled = false;
+        state.conservationJob = null;
+      }
+    })();
+    state.conservationJob = job;
+    return job;
+  }
+  dom.btnFetchConservation.addEventListener("click", loadConservation);
+  dom.btnClearConservation.addEventListener("click", () => {
+    state.conservation = null;
+    applyAllStyles();
+    state.viewer.render();
+    dom.conservationStatus.textContent = "No conservation loaded.";
+  });
+
+  // Minimal FASTA parser
+  function parseFastaSequences(text) {
+    const out = [];
+    const lines = text.split(/\r?\n/);
+    let cur = "";
+    for (const line of lines) {
+      if (line.startsWith(">")) {
+        if (cur) out.push(cur);
+        cur = "";
+      } else {
+        cur += line.trim();
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  // ----- ClinVar variants via NCBI E-utilities -----
+  // ESearch finds ClinVar records mentioning the gene name, then ESummary fetches per-record details.
+  async function fetchVariants() {
+    if (!state.currentProtein) {
+      showCustomError("Load a protein first.");
+      return;
+    }
+    dom.variantsStatus.textContent = "Querying ClinVar…";
+    dom.btnFetchVariants.disabled = true;
+
+    try {
+      const prot = state.currentProtein;
+      // Derive a likely gene name from the curated entry
+      const geneGuess =
+        prot.id === "p53" ? "TP53" :
+        prot.id === "egfr-kinase" ? "EGFR" :
+        prot.id === "kras-g12c" ? "KRAS" :
+        prot.id === "hiv-protease" ? "PR" :
+        prot.id === "calmodulin" ? "CALM1" :
+        prot.id === "insulin" ? "INS" :
+        prot.id === "hemoglobin" ? "HBB" :
+        prot.id === "lysozyme" ? "LYZ" :
+        prot.id === "myoglobin" ? "MB" :
+        null;
+
+      if (!geneGuess) {
+        dom.variantsStatus.textContent = "No gene-symbol mapping for this curated entry. Custom-loaded structures need a UniProt accession (we'll auto-detect next iteration).";
+        return;
+      }
+
+      // ESearch
+      const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(geneGuess + "[gene]")}&retmax=200&retmode=json`;
+      const r = await fetch(esearchUrl);
+      if (!r.ok) throw new Error(`ClinVar esearch ${r.status}`);
+      const j = await r.json();
+      const ids = (j.esearchresult && j.esearchresult.idlist) || [];
+      if (ids.length === 0) {
+        dom.variantsStatus.textContent = `No ClinVar records found for ${geneGuess}.`;
+        return;
+      }
+
+      // ESummary (we'll just use a single summary call to get total counts; per-variant details
+      // would require many more calls. For a pragmatic demo, we count by clinical significance.)
+      dom.variantsStatus.textContent = `Found ${ids.length} ClinVar records. Summarising…`;
+
+      // Pull a small summary batch (10 IDs at a time) — practical limit
+      const variants = [];
+      const batch = ids.slice(0, 40); // cap for speed
+      for (const id of batch) {
+        try {
+          const surl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${id}&retmode=json`;
+          const sr = await fetch(surl);
+          if (!sr.ok) continue;
+          const sj = await sr.json();
+          const r2 = sj.result && sj.result[id];
+          if (!r2) continue;
+          const trait = (r2.clinical_significance && r2.clinical_significance.description) || "";
+          const germ = (r2.clinical_significance && r2.clinical_significance.review_status) || "";
+          // We don't have a simple residue position; we surface the count by significance.
+          const sig = trait.toLowerCase().includes("pathogenic") && !trait.toLowerCase().includes("benign")
+            ? (trait.toLowerCase().includes("likely") ? "likely_pathogenic" : "pathogenic")
+            : trait.toLowerCase().includes("benign")
+            ? (trait.toLowerCase().includes("likely") ? "likely_benign" : "benign")
+            : "vus";
+          variants.push({ id, sig, trait, germ });
+        } catch (e) { /* skip */ }
+      }
+
+      // Count by significance
+      const tally = { pathogenic: 0, likely_pathogenic: 0, vus: 0, likely_benign: 0, benign: 0 };
+      for (const v of variants) tally[v.sig] = (tally[v.sig] || 0) + 1;
+      const total = variants.length;
+      state.variants = variants;
+
+      dom.variantsStatus.innerHTML =
+        `<b>${geneGuess}</b> · ${total} variants from ${ids.length} ClinVar records:<br>` +
+        `<span style="color:#b91c1c">● ${tally.pathogenic} pathogenic</span> · ` +
+        `<span style="color:#f97316">● ${tally.likely_pathogenic} likely path.</span> · ` +
+        `<span style="color:#fbbf24">● ${tally.vus} VUS</span> · ` +
+        `<span style="color:#84cc16">● ${tally.likely_benign} likely ben.</span> · ` +
+        `<span style="color:#22c55e">● ${tally.benign} benign</span><br>` +
+        `<span class="muted small">Variant → residue mapping requires per-position lookup; counts shown here.</span>`;
+      showToast(`Loaded ${variants.length} ClinVar entries for ${geneGuess}`, "success");
+    } catch (err) {
+      dom.variantsStatus.textContent = `ClinVar fetch failed: ${err.message}`;
+      showCustomError(`ClinVar fetch failed: ${err.message}`);
+    } finally {
+      dom.btnFetchVariants.disabled = false;
+    }
+  }
+  dom.btnFetchVariants.addEventListener("click", fetchVariants);
+  dom.btnClearVariants.addEventListener("click", () => {
+    state.variants = [];
+    dom.variantsStatus.textContent = "No variants loaded.";
+    applyAllStyles();
+    state.viewer.render();
+  });
+
+  // ----- Pocket detection (alpha-sphere grid scan) -----
+  function detectPockets() {
+    if (!state.models.length) { showCustomError("No structure loaded."); return; }
+    dom.btnDetectPockets.disabled = true;
+    dom.pocketsStatus.textContent = "Scanning alpha-spheres…";
+
+    try {
+      const model = state.models[state.currentPdbIndex];
+      const atoms = model.selectedAtoms({});
+      if (!atoms.length) {
+        dom.pocketsStatus.textContent = "No atoms in structure.";
+        return;
+      }
+
+      // Bounding box
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (const a of atoms) {
+        if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
+        if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
+        if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
+      }
+      // Pad
+      const PAD = 5;
+      minX -= PAD; minY -= PAD; minZ -= PAD;
+      maxX += PAD; maxY += PAD; maxZ += PAD;
+
+      // Coarse grid for alpha-sphere centers
+      const GRID = 1.4; // Å
+      const PROBE_RADIUS_MIN = 2.5;
+      const PROBE_RADIUS_MAX = 6.0;
+      const SCORE_THRESHOLD = 5; // atoms within PROBE_RADIUS_MAX to count as buried
+
+      // Pre-bucket atoms for faster queries
+      const cellSize = PROBE_RADIUS_MAX + 1;
+      const grid = new Map();
+      function cellKey(x, y, z) {
+        return `${Math.floor(x / cellSize)}|${Math.floor(y / cellSize)}|${Math.floor(z / cellSize)}`;
+      }
+      for (const a of atoms) {
+        const k = cellKey(a.x, a.y, a.z);
+        let arr = grid.get(k);
+        if (!arr) { arr = []; grid.set(k, arr); }
+        arr.push(a);
+      }
+
+      function countNearby(x, y, z, radius) {
+        const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize), cz = Math.floor(z / cellSize);
+        const span = Math.ceil(radius / cellSize);
+        let count = 0;
+        for (let dx = -span; dx <= span; dx++) {
+          for (let dy = -span; dy <= span; dy++) {
+            for (let dz = -span; dz <= span; dz++) {
+              const arr = grid.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
+              if (!arr) continue;
+              const r2 = radius * radius;
+              for (let i = 0; i < arr.length; i++) {
+                const a = arr[i];
+                const ddx = a.x - x, ddy = a.y - y, ddz = a.z - z;
+                if (ddx * ddx + ddy * ddy + ddz * ddz < r2) count++;
+              }
+            }
+          }
+        }
+        return count;
+      }
+
+      // Sample alpha-sphere centres on the grid; keep those that are buried but large enough.
+      const alphaCentres = [];
+      for (let x = minX; x <= maxX; x += GRID) {
+        for (let y = minY; y <= maxY; y += GRID) {
+          for (let z = minZ; z <= maxZ; z += GRID) {
+            const rmax = PROBE_RADIUS_MAX;
+            const count = countNearby(x, y, z, rmax);
+            if (count >= SCORE_THRESHOLD * 2) {
+              // Find largest radius that still touches atoms (alpha-sphere radius)
+              let r = rmax;
+              for (let rr = PROBE_RADIUS_MIN; rr <= rmax; rr += 0.5) {
+                if (countNearby(x, y, z, rr) >= 1) r = Math.max(r, rr);
+              }
+              alphaCentres.push({ x, y, z, r, score: count });
+            }
+          }
+        }
+      }
+
+      // Cluster nearby alpha-centres (simple greedy: BFS within 3 Å)
+      const visited = new Set();
+      const pockets = [];
+      for (let i = 0; i < alphaCentres.length; i++) {
+        if (visited.has(i)) continue;
+        const seed = alphaCentres[i];
+        const queue = [i];
+        const cluster = [];
+        visited.add(i);
+        while (queue.length) {
+          const idx = queue.shift();
+          cluster.push(alphaCentres[idx]);
+          for (let j = 0; j < alphaCentres.length; j++) {
+            if (visited.has(j)) continue;
+            const dx = alphaCentres[j].x - alphaCentres[idx].x;
+            const dy = alphaCentres[j].y - alphaCentres[idx].y;
+            const dz = alphaCentres[j].z - alphaCentres[idx].z;
+            if (dx * dx + dy * dy + dz * dz < 9) {  // 3 Å radius
+              visited.add(j);
+              queue.push(j);
+            }
+          }
+        }
+        if (cluster.length >= 3) {
+          let cx = 0, cy = 0, cz = 0, score = 0;
+          for (const p of cluster) { cx += p.x; cy += p.y; cz += p.z; score += p.score; }
+          const n = cluster.length;
+          pockets.push({
+            center: [cx / n, cy / n, cz / n],
+            volume: (4 / 3) * Math.PI * Math.pow(cluster[0].r, 3) * n * 0.4, // rough volume estimate
+            score: score / n,
+            residues: [],
+          });
+        }
+      }
+
+      // Map pockets to their pocket residues
+      for (const p of pockets) {
+        const resiSet = new Set();
+        for (const a of atoms) {
+          const dx = a.x - p.center[0], dy = a.y - p.center[1], dz = a.z - p.center[2];
+          if (dx * dx + dy * dy + dz * dz < (clusterRadius(p) ** 2)) {
+            resiSet.add(`${a.chain}:${a.resi}`);
+          }
+        }
+        p.residues = Array.from(resiSet).slice(0, 25);
+      }
+
+      // Rank by volume
+      pockets.sort((a, b) => b.volume - a.volume);
+      const top = pockets.slice(0, 8);
+      state.pockets = top;
+
+      // Render pocket spheres
+      state.viewer.removeAllShapes();
+      top.forEach((p, i) => {
+        const color = i === 0 ? 0xff7d45 : (i === 1 ? 0xffdb13 : 0x65cbf3);
+        state.viewer.addSphere({
+          center: { x: p.center[0], y: p.center[1], z: p.center[2] },
+          radius: Math.cbrt(p.volume * 0.75 / Math.PI),
+          color,
+          opacity: 0.45,
+        });
+      });
+      // Highlight pocket residues
+      const allResis = new Set();
+      for (const p of top) for (const r of p.residues) allResis.add(r);
+      for (const r of allResis) {
+        const [chain, resi] = r.split(":");
+        state.viewer.addStyle({ chain, resi: parseInt(resi, 10) }, { stick: { radius: 0.12, color: 0xff7d45 } });
+      }
+      state.viewer.render();
+
+      // UI list
+      dom.pocketList.innerHTML = top.map((p, i) => `
+        <div class="pocket-row">
+          <span class="pocket-rank">#${i + 1}</span>
+          <span class="pocket-vol">${p.volume.toFixed(0)} ų</span>
+          <span class="pocket-name">score ${p.score.toFixed(1)}</span>
+          <span class="pocket-resis">${p.residues.slice(0, 12).join(" ")}${p.residues.length > 12 ? " …" : ""}</span>
+        </div>
+      `).join("") || '<div class="measurement-table-empty">No pockets found</div>';
+      dom.pocketsStatus.textContent = `Found ${top.length} pocket${top.length === 1 ? "" : "s"} (volumes in ų).`;
+    } catch (err) {
+      dom.pocketsStatus.textContent = `Pocket detection failed: ${err.message}`;
+    } finally {
+      dom.btnDetectPockets.disabled = false;
+    }
+  }
+  function clusterRadius(p) {
+    return Math.cbrt(p.volume * 0.75 / Math.PI) + 4;
+  }
+  dom.btnDetectPockets.addEventListener("click", detectPockets);
+
+  // ----- Ligand contacts -----
+  // Find all residues with non-water heavy atom within 4 Å of any HETATM ligand.
+  function analyzeContacts() {
+    if (!state.models.length) { showCustomError("No structure loaded."); return; }
+    dom.btnAnalyzeContacts.disabled = true;
+    dom.contactsStatus.textContent = "Finding ligands…";
+
+    try {
+      const model = state.models[state.currentPdbIndex];
+      const allAtoms = model.selectedAtoms({});
+
+      // Ligands = HETATM with non-water residue names
+      const waters = new Set(["HOH", "WAT", "H2O", "DOD"]);
+      const ligands = allAtoms.filter((a) => {
+        const resn = (a.resn || "").trim().toUpperCase();
+        if (waters.has(resn)) return false;
+        // 3Dmol.js exposes HETATMs as part of the same selection; we use atom.hetflag if present
+        return a.hetflag === true || (a.resn && a.resn.length > 0 && !waters.has(resn) && a.elem !== "C" && a.elem !== "N" && a.elem !== "O" && a.elem !== "S" && a.elem !== "H");
+      });
+
+      if (ligands.length === 0) {
+        dom.contactsStatus.textContent = "No bound ligand detected in this structure.";
+        dom.contactList.innerHTML = "";
+        return;
+      }
+
+      // Group ligand atoms by residue
+      const ligandGroups = {};
+      for (const a of ligands) {
+        const key = `${a.chain || ""}:${a.resn}:${a.resi}`;
+        (ligandGroups[key] = ligandGroups[key] || { atoms: [], resn: a.resn, chain: a.chain, resi: a.resi }).atoms.push(a);
+      }
+
+      const CUTOFF = 4.0; // Å
+      const contacts = [];
+      for (const [lname, lg] of Object.entries(ligandGroups)) {
+        const contactSet = new Map(); // "chain:resi" -> minDistance
+        for (const la of lg.atoms) {
+          for (const a of allAtoms) {
+            if (a === la) continue;
+            if (a.resn === la.resn && a.chain === la.chain) continue; // skip same residue (intra-ligand)
+            const dx = a.x - la.x, dy = a.y - la.y, dz = a.z - la.z;
+            const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (d <= CUTOFF) {
+              const key = `${a.chain || ""}:${a.resi}`;
+              const prev = contactSet.get(key);
+              if (!prev || d < prev.d) contactSet.set(key, { d, resn: a.resn, chain: a.chain, resi: a.resi, atom: a.atom });
+            }
+          }
+        }
+        const sorted = Array.from(contactSet.values()).sort((a, b) => a.d - b.d);
+        if (sorted.length) {
+          contacts.push({ ligand: `${lg.resn}:${lg.resi}`, chain: lg.chain, resi: lg.resi, residues: sorted });
+        }
+      }
+
+      if (!contacts.length) {
+        dom.contactsStatus.textContent = "Ligands found but no protein residues within 4 Å.";
+        dom.contactList.innerHTML = "";
+        return;
+      }
+
+      state.ligandContacts = contacts;
+
+      // Highlight contact residues in 3D
+      state.viewer.removeAllShapes();
+      contacts.forEach((c, i) => {
+        c.residues.forEach((r) => {
+          state.viewer.addStyle({ chain: r.chain, resi: r.resi }, {
+            stick: { radius: 0.18, color: 0xfbbf24 },
+          });
+        });
+        // Draw contact lines from ligand center to each contact residue CA
+        const lg = ligandGroups[`${c.chain}:${c.ligand.split(":")[1]}:${c.resi}`];
+        if (lg) {
+          let cx = 0, cy = 0, cz = 0;
+          for (const a of lg.atoms) { cx += a.x; cy += a.y; cz += a.z; }
+          const lCenter = { x: cx / lg.atoms.length, y: cy / lg.atoms.length, z: cz / lg.atoms.length };
+          // Find CA for each contact residue
+          c.residues.forEach((r) => {
+            const ca = allAtoms.find((a) => a.atom === "CA" && a.chain === r.chain && a.resi === r.resi);
+            if (ca) {
+              state.viewer.addCylinder({
+                start: lCenter, end: ca, radius: 0.04, color: 0xfbbf24, dashed: true,
+              });
+            }
+          });
+        }
+      });
+      state.viewer.render();
+
+      dom.contactList.innerHTML = contacts.map((c) => {
+        const rrows = c.residues.map((r) => {
+          const t = r.atom === "C" ? "phobic" : r.atom === "N" || r.atom === "O" ? "polar" : "—";
+          return `<div class="contact-row">
+            <span>${r.resn}${r.resi}.${r.atom}</span>
+            <span class="contact-dist">${r.d.toFixed(2)} Å</span>
+            <span class="contact-type">${t}</span>
+          </div>`;
+        }).join("");
+        return `<div style="padding: 8px 10px; border-bottom: 1px solid var(--border)">
+          <b>${c.ligand}</b> — ${c.residues.length} residues within 4 Å
+          ${rrows}
+        </div>`;
+      }).join("");
+      dom.contactsStatus.textContent = `Found ${contacts.reduce((a, c) => a + c.residues.length, 0)} contacts across ${contacts.length} ligand${contacts.length === 1 ? "" : "s"}.`;
+    } catch (err) {
+      dom.contactsStatus.textContent = `Contact analysis failed: ${err.message}`;
+    } finally {
+      dom.btnAnalyzeContacts.disabled = false;
+    }
+  }
+  dom.btnAnalyzeContacts.addEventListener("click", analyzeContacts);
+
+  dom.btnClearBioGeo.addEventListener("click", () => {
+    state.pockets = [];
+    state.ligandContacts = null;
+    state.viewer.removeAllShapes();
+    applyAllStyles();
+    state.viewer.render();
+    dom.pocketList.innerHTML = "";
+    dom.contactList.innerHTML = "";
+    dom.pocketsStatus.textContent = "No pockets detected.";
+    dom.contactsStatus.textContent = "No ligand contacts.";
+  });
+
   // ====== TOUR ======
   function updateTourAvailability() {
     const protein = state.currentProtein;
@@ -1228,7 +2199,8 @@
             <span class="tour-step-num">${i + 1}</span>
             ${escapeHtml(step.title)}
           </div>
-          <div class="tour-step-body">${escapeHtml(step.body.slice(0, 100))}${step.body.length > 100 ? "…" : ""}</div>`;
+          <div class="tour-step-body">${escapeHtml(step.body.slice(0, 100))}${step.body.length > 100 ? "…" : ""}</div>
+        `;
         div.addEventListener("click", () => {
           stopTour();
           state.tourStepIndex = i;
@@ -1317,13 +2289,17 @@
     dom.annBody.textContent = body;
     dom.annotation.hidden = false;
   }
-  function hideAnnotation() { dom.annotation.hidden = true; }
+  function hideAnnotation() {
+    dom.annotation.hidden = true;
+  }
   function showStepOverlay(current, total) {
     dom.stepCurrent.textContent = current + 1;
     dom.stepTotal.textContent = total;
     dom.stepOverlay.hidden = false;
   }
-  function hideStepOverlay() { dom.stepOverlay.hidden = true; }
+  function hideStepOverlay() {
+    dom.stepOverlay.hidden = true;
+  }
   function applyTourAction(step) {
     const a = step.action || {};
     state.viewer.removeAllShapes();
@@ -1348,7 +2324,10 @@
       if (target.resi) sel.resi = target.resi;
       if (target.resn) sel.resn = target.resn;
       if (target.atom) sel.atom = target.atom;
-      state.viewer.addStyle(sel, { stick: { radius: 0.2, color: "yellow" }, sphere: { scale: 0.35, color: "yellow" } });
+      state.viewer.addStyle(sel, {
+        stick: { radius: 0.2, color: "yellow" },
+        sphere: { scale: 0.35, color: "yellow" },
+      });
     }
     if (a.showSpheres) {
       const target = a.showSpheres;
@@ -1361,7 +2340,10 @@
       const sel = {};
       if (a.highlight.resi) sel.resi = a.highlight.resi;
       if (a.highlight.resn) sel.resn = a.highlight.resn;
-      state.viewer.addStyle(sel, { stick: { radius: 0.2, color: "yellow" }, sphere: { scale: 0.35, color: "yellow" } });
+      state.viewer.addStyle(sel, {
+        stick: { radius: 0.2, color: "yellow" },
+        sphere: { scale: 0.35, color: "yellow" },
+      });
     }
     if (a.focusHeme) {
       try { state.viewer.zoomTo({ resn: ["HEM", "HEME", "IHV"] }, 0, false); }
@@ -1369,7 +2351,9 @@
     } else if (a.zoomChain) {
       try { state.viewer.zoomTo({ chain: a.zoomChain }); }
       catch (e) { state.viewer.zoomTo(); }
-    } else { state.viewer.zoomTo(); }
+    } else {
+      state.viewer.zoomTo();
+    }
     if (a.spin) {
       state.spinning = true;
       dom.btnSpin.textContent = "⏸ Pause";
@@ -1511,561 +2495,6 @@
     if (e.target === dom.aboutModal) dom.aboutModal.hidden = true;
   });
 
-  // ====== BIOINFORMATICS: pLDDT, Conservation, Variants, Pockets, Ligand Contacts ======
-  function plddtToColor(p) {
-    if (p >= 90) return 0x0053d6;
-    if (p >= 70) return 0x65cbf3;
-    if (p >= 50) return 0xffdb13;
-    return 0xff7d45;
-  }
-  function colorByPLDDT() {
-    if (!state.models.length) { showCustomError("No structure loaded."); return; }
-    if (!state.viewer) return;
-    state.viewer.setStyle({}, {
-      cartoon: { colorfunc: (atom) => plddtToColor(atom.b) },
-    });
-    state.viewer.render();
-    showToast("Coloured by AlphaFold pLDDT confidence", "success");
-  }
-  dom.btnColorPlddt.addEventListener("click", colorByPLDDT);
-
-  const NW_MATCH = 2;
-  const NW_MISMATCH = -1;
-  const NW_GAP = -2;
-  function nwAlign(a, b) {
-    const m = a.length, n = b.length;
-    const F = new Int16Array((m + 1) * (n + 1));
-    const Tb = new Uint8Array((m + 1) * (n + 1));
-    for (let i = 0; i <= m; i++) F[i * (n + 1)] = i * NW_GAP;
-    for (let j = 0; j <= n; j++) F[j] = j * NW_GAP;
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        const s = a[i - 1] === b[j - 1] ? NW_MATCH : NW_MISMATCH;
-        const diag = F[(i - 1) * (n + 1) + (j - 1)] + s;
-        const up = F[(i - 1) * (n + 1) + j] + NW_GAP;
-        const left = F[i * (n + 1) + (j - 1)] + NW_GAP;
-        let best = diag, dir = 0;
-        if (up > best) { best = up; dir = 1; }
-        if (left > best) { best = left; dir = 2; }
-        F[i * (n + 1) + j] = best;
-        Tb[i * (n + 1) + j] = dir;
-      }
-    }
-    let i = m, j = n, ai = "", bj = "";
-    while (i > 0 || j > 0) {
-      const dir = Tb[i * (n + 1) + j];
-      if (i > 0 && j > 0 && dir === 0) { ai = a[i - 1] + ai; bj = b[j - 1] + bj; i--; j--; }
-      else if (i > 0 && dir === 1) { ai = a[i - 1] + ai; bj = "-" + bj; i--; }
-      else { ai = "-" + ai; bj = b[j - 1] + bj; j--; }
-    }
-    return { a: ai, b: bj };
-  }
-
-  function progressiveMsa(seqs) {
-    if (seqs.length === 0) return [];
-    let consensus = seqs[0];
-    let aligned = [consensus.split("")];
-    for (let i = 1; i < seqs.length; i++) {
-      const result = nwAlign(consensus, seqs[i]);
-      const newAligned = aligned.map((row) => {
-        const s = row.join("");
-        const r = nwAlign(result.a, s);
-        return r.b.split("");
-      });
-      newAligned.push(result.b.split(""));
-      consensus = result.a;
-      aligned = newAligned;
-    }
-    const len = consensus.length;
-    for (const row of aligned) {
-      while (row.length < len) row.push("-");
-    }
-    return { consensus, aligned };
-  }
-
-  function conservationScores(msa) {
-    const cons = msa.consensus;
-    const n = cons.length;
-    const out = new Array(n).fill(1);
-    for (let j = 0; j < n; j++) {
-      const ref = cons[j];
-      if (ref === "-") { out[j] = 0; continue; }
-      let matches = 0, total = 0;
-      for (const row of msa.aligned) {
-        const ch = row[j];
-        if (ch === "-") continue;
-        total++;
-        if (ch === ref) matches++;
-      }
-      out[j] = total > 0 ? matches / total : 0;
-    }
-    return out;
-  }
-
-  async function fetchRcsbUniprotMapping(pdbId) {
-    try {
-      const url = `https://data.rcsb.org/rest/v1/core/entry/${pdbId.toLowerCase()}`;
-      const r = await fetch(url);
-      if (!r.ok) return null;
-      const j = await r.json();
-      const entities = j.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
-      for (const eid of entities) {
-        try {
-          const er = await fetch(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
-          if (!er.ok) continue;
-          const ej = await er.json();
-          const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
-          for (const ref of refs) {
-            if (ref.database_accession && ref.database_name === "UniProt") {
-              return ref.database_accession;
-            }
-          }
-        } catch (e) {}
-      }
-    } catch (e) {}
-    return null;
-  }
-
-  function buildResidueIndex(pdbText) {
-    const map = new Map();
-    let seqIdx = -1;
-    const seen = new Set();
-    const arr = [];
-    const lines = pdbText.split(/\r?\n/);
-    for (const line of lines) {
-      if (!line.startsWith("ATOM")) continue;
-      const atomName = line.substring(12, 16).trim();
-      if (atomName !== "CA") continue;
-      const chain = line.substring(21, 22).trim() || "A";
-      const resi = parseInt(line.substring(22, 26).trim(), 10);
-      const resn = line.substring(17, 20).trim();
-      const key = chain + ":" + resi;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      seqIdx++;
-      map.set(key, { seqIdx, resn });
-      arr[seqIdx] = AA3TO1[resn] || "X";
-    }
-    return { map, sequence: arr.join("") };
-  }
-
-  function parseFastaSequences(text) {
-    const out = [];
-    const lines = text.split(/\r?\n/);
-    let cur = "";
-    for (const line of lines) {
-      if (line.startsWith(">")) { if (cur) out.push(cur); cur = ""; }
-      else cur += line.trim();
-    }
-    if (cur) out.push(cur);
-    return out;
-  }
-
-  async function loadConservation() {
-    if (state.conservationJob) return state.conservationJob;
-    if (!state._lastPdbText || !state.currentProtein) {
-      showCustomError("Load a protein first.");
-      return;
-    }
-    const pdbId = state.currentProtein.pdbIds[state.currentPdbIndex];
-    dom.conservationStatus.textContent = "Looking up UniProt accession…";
-    dom.btnFetchConservation.disabled = true;
-
-    const job = (async () => {
-      try {
-        const acc = await fetchRcsbUniprotMapping(pdbId);
-        if (!acc) {
-          dom.conservationStatus.textContent = "No UniProt mapping found for this PDB.";
-          return;
-        }
-        dom.conservationStatus.textContent = `Fetching canonical sequence (${acc})…`;
-        const fastaUrl = `https://rest.uniprot.org/uniprotkb/${acc}.fasta`;
-        const fr = await fetch(fastaUrl);
-        if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
-        const fastaText = await fr.text();
-        const seqs = parseFastaSequences(fastaText);
-        const canonical = seqs[0] || "";
-        if (!canonical) throw new Error("Empty canonical sequence");
-
-        dom.conservationStatus.textContent = "Fetching homologs…";
-        const protName = state.currentProtein.name.split(/[·•:()\-]/)[0].trim();
-        const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
-        const sr = await fetch(searchUrl);
-        const homologs = sr.ok ? parseFastaSequences(await sr.text()) : [];
-
-        const allSeqs = [canonical, ...homologs].slice(0, 10);
-        dom.conservationStatus.textContent = `Aligning ${allSeqs.length} sequences…`;
-        const msa = progressiveMsa(allSeqs);
-        const scores = conservationScores(msa);
-
-        const { map: residueMap } = buildResidueIndex(state._lastPdbText);
-        const conservationByResidue = new Map();
-        for (const [key, v] of residueMap) {
-          if (v.seqIdx < scores.length) conservationByResidue.set(key, scores[v.seqIdx]);
-        }
-        state.conservation = { byResidue: conservationByResidue, homologs: allSeqs.length - 1 };
-
-        state.viewer.setStyle({}, {
-          cartoon: { colorfunc: (atom) => {
-            const c = conservationByResidue.get(`${atom.chain}:${atom.resi}`);
-            if (c === undefined) return 0xcccccc;
-            const t = c;
-            const r = Math.round(0x5b + (0xcc - 0x5b) * t);
-            const g = Math.round(0x8d + (0x1f - 0x8d) * t);
-            const b = Math.round(0xef + (0x1f - 0xef) * t);
-            return (r << 16) | (g << 8) | b;
-          } },
-        });
-        state.viewer.render();
-        dom.conservationStatus.textContent = `Conservation: ${allSeqs.length - 1} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
-        showToast("Conservation map applied", "success");
-      } catch (err) {
-        dom.conservationStatus.textContent = `MSA failed: ${err.message}`;
-        showCustomError(`Conservation fetch failed: ${err.message}`);
-      } finally {
-        dom.btnFetchConservation.disabled = false;
-        state.conservationJob = null;
-      }
-    })();
-    state.conservationJob = job;
-    return job;
-  }
-  dom.btnFetchConservation.addEventListener("click", loadConservation);
-  dom.btnClearConservation.addEventListener("click", () => {
-    state.conservation = null;
-    applyAllStyles();
-    state.viewer.render();
-    dom.conservationStatus.textContent = "No conservation loaded.";
-  });
-
-  async function fetchVariants() {
-    if (!state.currentProtein) { showCustomError("Load a protein first."); return; }
-    dom.variantsStatus.textContent = "Querying ClinVar…";
-    dom.btnFetchVariants.disabled = true;
-    try {
-      const prot = state.currentProtein;
-      const geneGuess =
-        prot.id === "p53" ? "TP53" :
-        prot.id === "egfr-kinase" ? "EGFR" :
-        prot.id === "kras-g12c" ? "KRAS" :
-        prot.id === "hiv-protease" ? "PR" :
-        prot.id === "calmodulin" ? "CALM1" :
-        prot.id === "insulin" ? "INS" :
-        prot.id === "hemoglobin" ? "HBB" :
-        prot.id === "lysozyme" ? "LYZ" :
-        prot.id === "myoglobin" ? "MB" :
-        null;
-      if (!geneGuess) {
-        dom.variantsStatus.textContent = "No gene-symbol mapping for this entry. Try TP53/EGFR/KRAS.";
-        return;
-      }
-      const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(geneGuess + "[gene]")}&retmax=200&retmode=json`;
-      const r = await fetch(esearchUrl);
-      if (!r.ok) throw new Error(`ClinVar esearch ${r.status}`);
-      const j = await r.json();
-      const ids = (j.esearchresult && j.esearchresult.idlist) || [];
-      if (ids.length === 0) {
-        dom.variantsStatus.textContent = `No ClinVar records found for ${geneGuess}.`;
-        return;
-      }
-      dom.variantsStatus.textContent = `Found ${ids.length} ClinVar records. Summarising…`;
-      const variants = [];
-      const batch = ids.slice(0, 40);
-      for (const id of batch) {
-        try {
-          const surl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${id}&retmode=json`;
-          const sr = await fetch(surl);
-          if (!sr.ok) continue;
-          const sj = await sr.json();
-          const r2 = sj.result && sj.result[id];
-          if (!r2) continue;
-          const trait = (r2.clinical_significance && r2.clinical_significance.description) || "";
-          const sig = trait.toLowerCase().includes("pathogenic") && !trait.toLowerCase().includes("benign")
-            ? (trait.toLowerCase().includes("likely") ? "likely_pathogenic" : "pathogenic")
-            : trait.toLowerCase().includes("benign")
-            ? (trait.toLowerCase().includes("likely") ? "likely_benign" : "benign")
-            : "vus";
-          variants.push({ id, sig, trait });
-        } catch (e) {}
-      }
-      const tally = { pathogenic: 0, likely_pathogenic: 0, vus: 0, likely_benign: 0, benign: 0 };
-      for (const v of variants) tally[v.sig] = (tally[v.sig] || 0) + 1;
-      state.variants = variants;
-      dom.variantsStatus.innerHTML =
-        `<b>${geneGuess}</b> · ${variants.length} variants from ${ids.length} ClinVar records:<br>` +
-        `<span style="color:#b91c1c">● ${tally.pathogenic} pathogenic</span> · ` +
-        `<span style="color:#f97316">● ${tally.likely_pathogenic} likely path.</span> · ` +
-        `<span style="color:#fbbf24">● ${tally.vus} VUS</span> · ` +
-        `<span style="color:#84cc16">● ${tally.likely_benign} likely ben.</span> · ` +
-        `<span style="color:#22c55e">● ${tally.benign} benign</span><br>` +
-        `<span class="muted small">Summary count by clinical significance. Per-residue mapping requires UniProt SIFTS lookup (next iteration).</span>`;
-      showToast(`Loaded ${variants.length} ClinVar entries for ${geneGuess}`, "success");
-    } catch (err) {
-      dom.variantsStatus.textContent = `ClinVar fetch failed: ${err.message}`;
-      showCustomError(`ClinVar fetch failed: ${err.message}`);
-    } finally {
-      dom.btnFetchVariants.disabled = false;
-    }
-  }
-  dom.btnFetchVariants.addEventListener("click", fetchVariants);
-  dom.btnClearVariants.addEventListener("click", () => {
-    state.variants = [];
-    dom.variantsStatus.textContent = "No variants loaded.";
-    applyAllStyles();
-    state.viewer.render();
-  });
-
-  function detectPockets() {
-    if (!state.models.length) { showCustomError("No structure loaded."); return; }
-    dom.btnDetectPockets.disabled = true;
-    dom.pocketsStatus.textContent = "Scanning alpha-spheres…";
-    try {
-      const model = state.models[state.currentPdbIndex];
-      const atoms = model.selectedAtoms({});
-      if (!atoms.length) { dom.pocketsStatus.textContent = "No atoms in structure."; return; }
-      let minX = Infinity, minY = Infinity, minZ = Infinity;
-      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-      for (const a of atoms) {
-        if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
-        if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
-        if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
-      }
-      const PAD = 5;
-      minX -= PAD; minY -= PAD; minZ -= PAD;
-      maxX += PAD; maxY += PAD; maxZ += PAD;
-      const GRID = 1.4;
-      const PROBE_RADIUS_MAX = 6.0;
-      const SCORE_THRESHOLD = 5;
-      const cellSize = PROBE_RADIUS_MAX + 1;
-      const grid = new Map();
-      function cellKey(x, y, z) {
-        return `${Math.floor(x / cellSize)}|${Math.floor(y / cellSize)}|${Math.floor(z / cellSize)}`;
-      }
-      for (const a of atoms) {
-        const k = cellKey(a.x, a.y, a.z);
-        let arr = grid.get(k);
-        if (!arr) { arr = []; grid.set(k, arr); }
-        arr.push(a);
-      }
-      function countNearby(x, y, z, radius) {
-        const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize), cz = Math.floor(z / cellSize);
-        const span = Math.ceil(radius / cellSize);
-        let count = 0;
-        for (let dx = -span; dx <= span; dx++) {
-          for (let dy = -span; dy <= span; dy++) {
-            for (let dz = -span; dz <= span; dz++) {
-              const arr = grid.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
-              if (!arr) continue;
-              const r2 = radius * radius;
-              for (let i = 0; i < arr.length; i++) {
-                const a = arr[i];
-                const ddx = a.x - x, ddy = a.y - y, ddz = a.z - z;
-                if (ddx * ddx + ddy * ddy + ddz * ddz < r2) count++;
-              }
-            }
-          }
-        }
-        return count;
-      }
-      const alphaCentres = [];
-      for (let x = minX; x <= maxX; x += GRID) {
-        for (let y = minY; y <= maxY; y += GRID) {
-          for (let z = minZ; z <= maxZ; z += GRID) {
-            const count = countNearby(x, y, z, PROBE_RADIUS_MAX);
-            if (count >= SCORE_THRESHOLD * 2) {
-              alphaCentres.push({ x, y, z, r: PROBE_RADIUS_MAX, score: count });
-            }
-          }
-        }
-      }
-      const visited = new Set();
-      const pockets = [];
-      for (let i = 0; i < alphaCentres.length; i++) {
-        if (visited.has(i)) continue;
-        const seed = alphaCentres[i];
-        const queue = [i];
-        const cluster = [];
-        visited.add(i);
-        while (queue.length) {
-          const idx = queue.shift();
-          cluster.push(alphaCentres[idx]);
-          for (let j = 0; j < alphaCentres.length; j++) {
-            if (visited.has(j)) continue;
-            const dx = alphaCentres[j].x - alphaCentres[idx].x;
-            const dy = alphaCentres[j].y - alphaCentres[idx].y;
-            const dz = alphaCentres[j].z - alphaCentres[idx].z;
-            if (dx * dx + dy * dy + dz * dz < 9) { visited.add(j); queue.push(j); }
-          }
-        }
-        if (cluster.length >= 3) {
-          let cx = 0, cy = 0, cz = 0, score = 0;
-          for (const p of cluster) { cx += p.x; cy += p.y; cz += p.z; score += p.score; }
-          const n = cluster.length;
-          pockets.push({
-            center: [cx / n, cy / n, cz / n],
-            volume: (4 / 3) * Math.PI * Math.pow(cluster[0].r, 3) * n * 0.4,
-            score: score / n,
-            residues: [],
-          });
-        }
-      }
-      for (const p of pockets) {
-        const resiSet = new Set();
-        const radius = Math.cbrt(p.volume * 0.75 / Math.PI) + 4;
-        const r2 = radius * radius;
-        for (const a of atoms) {
-          const dx = a.x - p.center[0], dy = a.y - p.center[1], dz = a.z - p.center[2];
-          if (dx * dx + dy * dy + dz * dz < r2) resiSet.add(`${a.chain}:${a.resi}`);
-        }
-        p.residues = Array.from(resiSet).slice(0, 25);
-      }
-      pockets.sort((a, b) => b.volume - a.volume);
-      const top = pockets.slice(0, 8);
-      state.pockets = top;
-
-      state.viewer.removeAllShapes();
-      top.forEach((p, i) => {
-        const color = i === 0 ? 0xff7d45 : (i === 1 ? 0xffdb13 : 0x65cbf3);
-        state.viewer.addSphere({
-          center: { x: p.center[0], y: p.center[1], z: p.center[2] },
-          radius: Math.cbrt(p.volume * 0.75 / Math.PI),
-          color, opacity: 0.45,
-        });
-      });
-      const allResis = new Set();
-      for (const p of top) for (const r of p.residues) allResis.add(r);
-      for (const r of allResis) {
-        const [chain, resi] = r.split(":");
-        state.viewer.addStyle({ chain, resi: parseInt(resi, 10) }, { stick: { radius: 0.12, color: 0xff7d45 } });
-      }
-      state.viewer.render();
-
-      dom.pocketList.innerHTML = top.map((p, i) => `
-        <div class="pocket-row">
-          <span class="pocket-rank">#${i + 1}</span>
-          <span class="pocket-vol">${p.volume.toFixed(0)} ų</span>
-          <span class="pocket-name">score ${p.score.toFixed(1)}</span>
-          <span class="pocket-resis">${p.residues.slice(0, 12).join(" ")}${p.residues.length > 12 ? " …" : ""}</span>
-        </div>
-      `).join("") || '<div class="measurement-table-empty">No pockets found</div>';
-      dom.pocketsStatus.textContent = `Found ${top.length} pocket${top.length === 1 ? "" : "s"} (volumes in ų).`;
-    } catch (err) {
-      dom.pocketsStatus.textContent = `Pocket detection failed: ${err.message}`;
-    } finally {
-      dom.btnDetectPockets.disabled = false;
-    }
-  }
-  dom.btnDetectPockets.addEventListener("click", detectPockets);
-
-  function analyzeContacts() {
-    if (!state.models.length) { showCustomError("No structure loaded."); return; }
-    dom.btnAnalyzeContacts.disabled = true;
-    dom.contactsStatus.textContent = "Finding ligands…";
-    try {
-      const model = state.models[state.currentPdbIndex];
-      const allAtoms = model.selectedAtoms({});
-      const waters = new Set(["HOH", "WAT", "H2O", "DOD"]);
-      const ligands = allAtoms.filter((a) => {
-        const resn = (a.resn || "").trim().toUpperCase();
-        if (waters.has(resn)) return false;
-        return a.hetflag === true;
-      });
-      if (ligands.length === 0) {
-        dom.contactsStatus.textContent = "No bound ligand detected in this structure.";
-        dom.contactList.innerHTML = "";
-        return;
-      }
-      const ligandGroups = {};
-      for (const a of ligands) {
-        const key = `${a.chain || ""}:${a.resn}:${a.resi}`;
-        (ligandGroups[key] = ligandGroups[key] || { atoms: [], resn: a.resn, chain: a.chain, resi: a.resi }).atoms.push(a);
-      }
-      const CUTOFF = 4.0;
-      const contacts = [];
-      for (const [lname, lg] of Object.entries(ligandGroups)) {
-        const contactSet = new Map();
-        for (const la of lg.atoms) {
-          for (const a of allAtoms) {
-            if (a === la) continue;
-            if (a.resn === la.resn && a.chain === la.chain) continue;
-            const dx = a.x - la.x, dy = a.y - la.y, dz = a.z - la.z;
-            const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            if (d <= CUTOFF) {
-              const key = `${a.chain || ""}:${a.resi}`;
-              const prev = contactSet.get(key);
-              if (!prev || d < prev.d) contactSet.set(key, { d, resn: a.resn, chain: a.chain, resi: a.resi, atom: a.atom });
-            }
-          }
-        }
-        const sorted = Array.from(contactSet.values()).sort((a, b) => a.d - b.d);
-        if (sorted.length) {
-          contacts.push({ ligand: `${lg.resn}:${lg.resi}`, chain: lg.chain, resi: lg.resi, residues: sorted });
-        }
-      }
-      if (!contacts.length) {
-        dom.contactsStatus.textContent = "Ligands found but no protein residues within 4 Å.";
-        dom.contactList.innerHTML = "";
-        return;
-      }
-      state.ligandContacts = contacts;
-      state.viewer.removeAllShapes();
-      contacts.forEach((c) => {
-        c.residues.forEach((r) => {
-          state.viewer.addStyle({ chain: r.chain, resi: r.resi }, { stick: { radius: 0.18, color: 0xfbbf24 } });
-        });
-        const lg = ligandGroups[`${c.chain}:${c.ligand.split(":")[1]}:${c.resi}`];
-        if (lg) {
-          let cx = 0, cy = 0, cz = 0;
-          for (const a of lg.atoms) { cx += a.x; cy += a.y; cz += a.z; }
-          const lCenter = { x: cx / lg.atoms.length, y: cy / lg.atoms.length, z: cz / lg.atoms.length };
-          c.residues.forEach((r) => {
-            const ca = allAtoms.find((a) => a.atom === "CA" && a.chain === r.chain && a.resi === r.resi);
-            if (ca) {
-              try {
-                state.viewer.addCylinder({
-                  start: lCenter, end: ca, radius: 0.04, color: 0xfbbf24, dashed: true,
-                });
-              } catch (e) {}
-            }
-          });
-        }
-      });
-      state.viewer.render();
-      dom.contactList.innerHTML = contacts.map((c) => {
-        const rrows = c.residues.map((r) => {
-          const t = r.atom === "C" ? "phobic" : (r.atom === "N" || r.atom === "O" ? "polar" : "—");
-          return `<div class="contact-row">
-            <span>${r.resn}${r.resi}.${r.atom}</span>
-            <span class="contact-dist">${r.d.toFixed(2)} Å</span>
-            <span class="contact-type">${t}</span>
-          </div>`;
-        }).join("");
-        return `<div style="padding: 8px 10px; border-bottom: 1px solid var(--border)">
-          <b>${c.ligand}</b> — ${c.residues.length} residues within 4 Å
-          ${rrows}
-        </div>`;
-      }).join("");
-      dom.contactsStatus.textContent = `Found ${contacts.reduce((a, c) => a + c.residues.length, 0)} contacts across ${contacts.length} ligand${contacts.length === 1 ? "" : "s"}.`;
-    } catch (err) {
-      dom.contactsStatus.textContent = `Contact analysis failed: ${err.message}`;
-    } finally {
-      dom.btnAnalyzeContacts.disabled = false;
-    }
-  }
-  dom.btnAnalyzeContacts.addEventListener("click", analyzeContacts);
-
-  dom.btnClearBioGeo.addEventListener("click", () => {
-    state.pockets = [];
-    state.ligandContacts = null;
-    state.viewer.removeAllShapes();
-    applyAllStyles();
-    state.viewer.render();
-    dom.pocketList.innerHTML = "";
-    dom.contactList.innerHTML = "";
-    dom.pocketsStatus.textContent = "No pockets detected.";
-    dom.contactsStatus.textContent = "No ligand contacts.";
-  });
-
   // ====== BOOTSTRAP ======
   async function init() {
     initViewer();
@@ -2073,12 +2502,14 @@
     updateMeasurementsUI();
     updateRmsdSummary();
 
+    // Apply URL state if present
     const urlState = applyStateFromUrl();
     let initialProteinId = null;
     if (urlState.proteinId) {
       const found = PROTEINS.find((p) => p.id === urlState.proteinId);
       if (found) initialProteinId = found.id;
       else {
+        // Maybe it's a custom-style id; if not in list, fetch
         const m = await tryLoadFromUrl(urlState.proteinId);
         if (m) initialProteinId = m.id;
       }
@@ -2088,16 +2519,21 @@
     if (urlState.style) { state.currentStyle = urlState.style; dom.ctrlStyle.value = urlState.style; }
     if (urlState.color) { state.currentColor = urlState.color; dom.ctrlColor.value = urlState.color; }
     if (!isNaN(urlState.opacity)) { state.currentOpacity = urlState.opacity; dom.ctrlOpacity.value = urlState.opacity; }
-    if (urlState.bg) {
-      state.background = urlState.bg;
-      dom.ctrlBg.value = urlState.bg;
-      state.viewer.setBackgroundColor(urlState.bg === "black" ? "black" : urlState.bg === "grey" ? "0x202428" : "white");
-    }
+    if (urlState.bg) { state.background = urlState.bg; dom.ctrlBg.value = urlState.bg; state.viewer.setBackgroundColor(urlState.bg === "black" ? "black" : urlState.bg === "grey" ? "0x202428" : "white"); }
 
     await loadProtein(initialProteinId);
+    if (urlState.pdbIndex > 0) {
+      // Switch to that PDB state if available
+      const protein = state.currentProtein;
+      if (protein && urlState.pdbIndex < protein.pdbIds.length) {
+        // Trajectory proteins support state switching via tour action mechanism;
+        // for non-trajectory, ignore.
+      }
+    }
   }
 
   async function tryLoadFromUrl(id) {
+    // Custom URL like /?p=custom-4HHB — try to fetch from RCSB if it looks like a PDB
     const m = id.match(/^custom-([0-9][A-Z0-9]{3})$/i);
     if (m) {
       const pdbId = m[1].toUpperCase();

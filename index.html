@@ -6,15 +6,13 @@
   <title>Protein Flow Explorer — Interactive 3D Biology Visualizer</title>
   <meta
     name="description"
-    content="Interactive web tool for visualising protein 3D structures with guided tours, conformational-change playback, measurement tools, sequence navigation, UniProt lookup, side-by-side comparison, pLDDT confidence, conservation analysis, ClinVar variants, druggable-pocket detection, ligand contacts, and shareable views. Built for teaching and research."
+    content="Interactive web tool for visualising protein 3D structures with guided tours, conformational-change playback, measurement tools, sequence navigation, UniProt lookup, side-by-side comparison, and shareable views. Built for teaching and research."
   />
   <link rel="stylesheet" href="styles.css" />
   <link rel="preconnect" href="https://files.rcsb.org" />
   <link rel="preconnect" href="https://cdn.jsdelivr.net" />
   <link rel="preconnect" href="https://rest.uniprot.org" />
   <link rel="preconnect" href="https://alphafold.ebi.ac.uk" />
-  <link rel="preconnect" href="https://eutils.ncbi.nlm.nih.gov" />
-  <link rel="preconnect" href="https://data.rcsb.org" />
 </head>
 <body>
   <!-- ============== HEADER ============== -->
@@ -23,7 +21,7 @@
       <div class="logo">🧬</div>
       <div class="brand-text">
         <h1>Protein Flow Explorer</h1>
-        <p class="tagline">Visualize, measure & explain 3D protein structures</p>
+        <p class="tagline">Visualize, measure &amp; explain 3D protein structures</p>
       </div>
     </div>
     <div class="header-meta">
@@ -184,7 +182,7 @@
               <select id="ctrl-style">
                 <option value="cartoon">Cartoon</option>
                 <option value="surface">Surface</option>
-                <option value="ball+stick">Ball & Stick</option>
+                <option value="ball+stick">Ball &amp; Stick</option>
                 <option value="stick">Sticks</option>
                 <option value="spacefill">Spacefill</option>
                 <option value="ribbon">Ribbon</option>
@@ -422,9 +420,7 @@
           <b>Protein Flow Explorer</b> is a free, open tool for visualising, measuring and
           explaining 3D protein structures. Originally built for teaching — now extended
           for working researchers with sequence navigation, atom picking,
-          UniProt / AlphaFold lookup, structure comparison, pLDDT confidence,
-          conservation analysis, ClinVar variants, druggable-pocket detection,
-          ligand-contact analysis, and shareable views.
+          UniProt / AlphaFold lookup, structure comparison, and shareable views.
         </p>
         <h3>For students</h3>
         <ul>
@@ -438,14 +434,12 @@
           <li><b>Sequence.</b> One-click navigation between sequence and structure. Click any residue to highlight it; click again to zoom.</li>
           <li><b>UniProt lookup.</b> Type <code>TP53</code> or <code>P04637</code> → loads the matching PDB or AlphaFold model.</li>
           <li><b>Compare.</b> Superimpose two structures on Cα and colour by per-residue RMSD.</li>
-          <li><b>Bioinformatics.</b> pLDDT confidence, MSA-derived conservation, ClinVar variants, druggable pockets, ligand contacts.</li>
           <li><b>Share link.</b> The current view (protein, state, style, colour, tour step, measurements) is encoded in the URL — paste a link to reproduce the exact view.</li>
         </ul>
         <h3>Data sources</h3>
         <ul>
           <li>Structures: <a href="https://www.rcsb.org" target="_blank" rel="noopener">RCSB PDB</a>, <a href="https://alphafold.ebi.ac.uk" target="_blank" rel="noopener">AlphaFold DB</a></li>
-          <li>Sequences & homologs: <a href="https://www.uniprot.org" target="_blank" rel="noopener">UniProt</a></li>
-          <li>Disease variants: <a href="https://www.ncbi.nlm.nih.gov/clinvar/" target="_blank" rel="noopener">ClinVar</a></li>
+          <li>Identifiers: <a href="https://www.uniprot.org" target="_blank" rel="noopener">UniProt</a></li>
         </ul>
         <p class="muted small">
           Educational tool, not for clinical use. Structure coordinates are fetched live;
