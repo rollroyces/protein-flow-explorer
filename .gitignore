@@ -1,0 +1,14 @@
+# macOS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Node (not used — static site, but just in case)
+node_modules/
+
+# Local scratch
+*.log
+.DS_Store
