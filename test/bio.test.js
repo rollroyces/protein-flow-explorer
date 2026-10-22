@@ -55,9 +55,15 @@ const src = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
 const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { plddtToColor, midPoint, computeDistance, computeAngle,\n" +
   "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
-  "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE };\n})();");
+  "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
+  "    isHydrophobicResidue, isIonic, extractPdbTitle, computeLigandProperties,\n" +
+  "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF };\n})();");
 vm.runInThisContext(probe, { filename: "app.js" });
 const P = global.__PROBE__;
+const {
+  isPlanarAromatic, isHydrophobicResidue, isIonic, extractPdbTitle,
+  HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF,
+} = P;
 
 let pass = 0, fail = 0;
 const near = (a, b, tol) => Math.abs(a - b) <= tol;
@@ -111,6 +117,28 @@ check("scores in [0,1]",   sc.every((v) => v >= 0 && v <= 1));
 check("no NaN",            sc.every((v) => !Number.isNaN(v)));
 const identical = P.nwAlign("ACDEFGHIK", "ACDEFGHIK");
 check("identical seqs ungapped", !identical.a.includes("-") && !identical.b.includes("-"));
+
+
+console.log("\nLigand-property chemistry helpers");
+check("PHE is planar aromatic",  isPlanarAromatic({ resn: "PHE" }));
+check("TYR is planar aromatic",  isPlanarAromatic({ resn: "TYR" }));
+check("ALA is not aromatic",     !isPlanarAromatic({ resn: "ALA" }));
+check("LEU is hydrophobic",      isHydrophobicResidue("LEU"));
+check("GLY is hydrophobic",      isHydrophobicResidue("GLY"));
+check("SER is not hydrophobic",  !isHydrophobicResidue("SER"));
+check("ZN recognised as ion",    isIonic({ compId: "ZN" }));
+check("FE recognised as ion",    isIonic({ compId: "FE" }));
+check("AQ4 not an ion",         !isIonic({ compId: "AQ4" }));
+
+console.log("\nInteraction cutoff constants");
+check("H-bond cutoff 3.5 A", HBOND_CUTOFF === 3.5);
+check("salt cutoff 4.0 A",   SALT_CUTOFF === 4.0);
+check("pi cutoff 5.5 A",     PI_CUTOFF === 5.5);
+
+console.log("\nPDB TITLE extraction");
+check("extracts TITLE record",
+  extractPdbTitle("HEADER    HYDROLASE\nTITLE     CRYSTAL STRUCTURE OF LYSOZYME\nCOMPND") === "CRYSTAL STRUCTURE OF LYSOZYME");
+check("returns null when absent", extractPdbTitle("ATOM      1  N   MET A   1") === null);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

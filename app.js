@@ -74,14 +74,12 @@
     rmsdPerResidue: null,   // array of {resi, chain, value}
     rmsdColorMode: false,
 
-    // ----- Bioinformatics analysis results -----
-    conservation: null,      // {byResidue: Map "chain:resi" -> 0..1, homologs: number}
-    conservationJob: null,   // Promise tracking in-flight fetch
-    variants: [],            // [{resi, chain, mutation, significance, color}]
-    pockets: [],             // [{id, center:[x,y,z], volume, score, residues:[{chain,resi}]}]
-    ligandContacts: null,    // {ligandName, residue, contacts:[{chain,resi,resn,distance,type}]}
-
-    // ----- End bioinformatics -----
+    // ----- Metadata / ligands / interactions (mol-bio + drug discovery) -----
+    meta: null,             // RCSB entry metadata (method, resolution, title…)
+    ligands: [],            // [{compId, name, chains, entityId}]
+    activeLigand: null,
+    interactions: null,     // {hbonds:[], salts:[], pi:[], hydro:[]}
+    hiddenChains: new Set(),
   };
 
   // ====== DOM REFS ======
@@ -193,6 +191,29 @@
     contactsStatus: $("contacts-status"),
     pocketList: $("pocket-list"),
     contactList: $("contact-list"),
+
+    // Metadata / ligand / navigation / export
+    metaGrid: $("meta-grid"),
+    ligandList: $("ligand-list"),
+    ligandSelect: $("ligand-select"),
+    ligandPropStatus: $("ligand-prop-status"),
+    propGrid: $("prop-grid"),
+    resiChain: $("resi-chain"),
+    resiNum: $("resi-num"),
+    btnGoResidue: $("btn-go-residue"),
+    chainToggles: $("chain-toggles"),
+    btnExportPdb: $("btn-export-pdb"),
+    btnExportCsv: $("btn-export-csv"),
+    exportStatus: $("export-status"),
+
+    // Drug design
+    btnHbond: $("btn-hbonds"),
+    btnClearInteractions: $("btn-clear-interactions"),
+    hbondStatus: $("hbond-status"),
+    interactionSummary: $("interaction-summary"),
+    mutInput: $("mut-input"),
+    btnCheckMutation: $("btn-check-mutation"),
+    mutationStatus: $("mutation-status"),
 
     // Modal / share
     btnAbout: $("btn-about"),
@@ -746,6 +767,10 @@
 
       // Parse sequence + SS for sequence panel
       parseAndRenderSequence();
+
+      // Chain visibility toggles + RCSB metadata (method/resolution/ligands)
+      renderChainToggles();
+      loadStructureMetadata();
 
       // Update URL
       updateUrlDebounced();
@@ -2538,6 +2563,483 @@
   dom.aboutModal.addEventListener("click", (e) => {
     if (e.target === dom.aboutModal) dom.aboutModal.hidden = true;
   });
+
+  // ====== STRUCTURE METADATA (RCSB data API) ======
+  async function loadStructureMetadata() {
+    const protein = state.currentProtein;
+    if (!protein) return;
+    const pdbId = protein.pdbIds[state.currentPdbIndex];
+    if (!/^[0-9A-Za-z]{4}$/.test(pdbId)) {
+      dom.metaGrid.innerHTML = '<div class="muted small">Metadata only available for deposited PDB entries.</div>';
+      return;
+    }
+    dom.metaGrid.innerHTML = '<div class="muted small">Loading metadata…</div>';
+    try {
+      const id = pdbId.toLowerCase();
+      const entryRes = await fetch(`https://data.rcsb.org/rest/v1/core/entry/${id}`);
+      if (!entryRes.ok) throw new Error(`entry ${entryRes.status}`);
+      const entry = await entryRes.json();
+      const info = entry.rcsb_entry_info || {};
+      const method = (entry.exptl && entry.exptl[0] && entry.exptl[0].method) || "—";
+      const resArr = info.resolution_combined || [];
+      const resolution = resArr.length ? `${resArr[resArr.length - 1].toFixed(2)} Å` : "—";
+      const rfree = info.r_free != null ? info.r_free.map((r) => Number(r).toFixed(3)).join(", ") : "—";
+      const rwork = info.r_work != null ? info.r_work.map((r) => Number(r).toFixed(3)).join(", ") : "—";
+      const deposited = entry.rcsb_accession_info?.deposit_date || "—";
+      const released = entry.rcsb_accession_info?.initial_release_date || "—";
+      const title = (entry.struct && entry.struct.title) || protein.name;
+
+      state.meta = { pdbId, method, resolution, rfree, rwork, deposited, released, title };
+
+      // Ligands: fetch each non-polymer entity
+      const npIds = entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || [];
+      const ligands = [];
+      for (const eid of npIds) {
+        try {
+          const r = await fetch(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${id}/${eid}`);
+          if (!r.ok) continue;
+          const j = await r.json();
+          const np = j.pdbx_entity_nonpoly || {};
+          const cid = j.rcsb_nonpolymer_entity_container_identifiers?.comp_id;
+          const name = (np.name || "").trim();
+          if (!cid || /^HOH$/i.test(cid)) continue;
+          ligands.push({
+            compId: cid.toUpperCase(),
+            name: name || cid,
+            formula: np.formula || null,
+            entityId: eid,
+          });
+        } catch (e) { /* skip entity */ }
+      }
+      state.ligands = ligands;
+      renderMetadataPanel();
+      renderLigandList();
+    } catch (err) {
+      dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable: ${escapeHtml(err.message)}</div>`;
+    }
+  }
+
+  function renderMetadataPanel() {
+    const m = state.meta;
+    if (!m) return;
+    const rows = [
+      ["PDB ID", `<span class="res-badge">${escapeHtml(m.pdbId.toUpperCase())}</span>`],
+      ["Method", escapeHtml(m.method)],
+      ["Resolution", escapeHtml(m.resolution)],
+      ["R-work / R-free", `${escapeHtml(m.rwork)} / ${escapeHtml(m.rfree)}`],
+      ["Deposited", escapeHtml(m.deposited)],
+      ["Released", escapeHtml(m.released)],
+      ["Title", escapeHtml(m.title)],
+    ];
+    dom.metaGrid.innerHTML = rows
+      .map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`)
+      .join("");
+  }
+
+  // ====== LIGAND BROWSER ======
+  function renderLigandList() {
+    const ligs = state.ligands || [];
+    if (!ligs.length) {
+      dom.ligandList.innerHTML = '<div class="measurement-table-empty">No ligands in this entry</div>';
+      dom.ligandSelect.innerHTML = "";
+      dom.propGrid.innerHTML = "";
+      return;
+    }
+    dom.ligandList.innerHTML = ligs
+      .map((l, i) => `
+        <div class="ligand-row" data-lig="${i}">
+          <span class="ligand-cid">${escapeHtml(l.compId)}</span>
+          <span class="ligand-name" title="${escapeHtml(l.name)}">${escapeHtml(l.name)}</span>
+          <span class="ligand-chain">${l.formula ? escapeHtml(l.formula) : ""}</span>
+        </div>`)
+      .join("");
+    dom.ligandList.querySelectorAll(".ligand-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const i = parseInt(row.dataset.lig, 10);
+        selectLigand(i);
+      });
+    });
+
+    dom.ligandSelect.innerHTML = ligs
+      .map((l, i) => `<option value="${i}">${escapeHtml(l.compId)} — ${escapeHtml(l.name)}</option>`)
+      .join("");
+    dom.ligandSelect.onchange = (e) => selectLigand(parseInt(e.target.value, 10));
+    selectLigand(0);
+  }
+
+  function selectLigand(index) {
+    const ligs = state.ligands || [];
+    const l = ligs[index];
+    if (!l) return;
+    state.activeLigand = l;
+    dom.ligandList.querySelectorAll(".ligand-row").forEach((r, i) => {
+      r.classList.toggle("active", i === index);
+    });
+    dom.ligandSelect.value = String(index);
+
+    // Isolate the ligand in the viewer
+    applyAllStyles();
+    state.viewer.addStyle({ resn: l.compId }, {
+      stick: { radius: 0.22, color: 0xffd54f },
+      sphere: { scale: 0.28, color: 0xffd54f },
+    });
+    try { state.viewer.zoomTo({ resn: l.compId }, 0, false); } catch (e) { /* ignore */ }
+    state.viewer.render();
+
+    renderLigandProperties(l);
+  }
+
+  // Physicochemical descriptors computed from the loaded model.
+  const LIG_ELEMENTS = new Set(["C", "N", "O", "S", "P", "F", "Cl", "Br", "I", "H"]);
+  function computeLigandProperties(compId) {
+    const model = state.models[state.currentPdbIndex];
+    if (!model) return null;
+    let atoms;
+    try { atoms = model.selectedAtoms({ resn: compId }); } catch (e) { return null; }
+    if (!atoms || !atoms.length) return null;
+
+    let heavy = 0, c = 0, n = 0, o = 0, s = 0, halogens = 0;
+    const aromRings = new Set();
+    for (const a of atoms) {
+      const el = (a.elem || "").toUpperCase();
+      if (el === "H") continue;
+      heavy++;
+      if (el === "C") { c++; if (a.bond === "ar" || a.aromatic) aromRings.add(a.resi + ":" + a.chain); }
+      else if (el === "N") n++;
+      else if (el === "O") o++;
+      else if (el === "S") s++;
+      else if (el === "F" || el === "CL" || el === "BR" || el === "I") halogens++;
+    }
+    if (!heavy) return null;
+
+    const mw = c * 12.011 + n * 14.007 + o * 15.999 + s * 32.06 + halogens * 78.9;
+    const hbd = Math.max(0, n);           // simplified: one donor per N
+    const hba = o + n;                     // simplified: O and N are acceptors
+    const tpsa = o * 20.23 + n * 25.78;    // Ertl fragment contributions
+    const logp = (c * 1.46 + halogens * 1.23) - (o * 1.5 + n * 1.5) - 0.1; // crude Crippen-like
+    const rotb = Math.max(0, heavy - 5);
+    const lipinskiPass = mw <= 500 && logp <= 5 && hbd <= 5 && hba <= 10;
+    const veberPass = rotb <= 10 && tpsa <= 140;
+
+    return {
+      heavy, mw, hbd, hba, tpsa, logp, rotb, lipinskiPass, veberPass,
+      formula: `C${c} H? N${n} O${o}${s ? " S" + s : ""}${halogens ? " Hal" + halogens : ""}`,
+    };
+  }
+
+  function renderLigandProperties(l) {
+    const props = computeLigandProperties(l.compId);
+    if (!props) {
+      dom.ligandPropStatus.textContent = "Could not read atoms for this ligand.";
+      dom.propGrid.innerHTML = "";
+      return;
+    }
+    const ligName = (l.name || "").toLowerCase();
+    const isNucleic = /\b(adenosine|guanosine|cytidine|uridine|thymidine|dna|rna|phosphate|cytidyl)\b/.test(ligName);
+    const isIon = l.compId.length <= 3 && /^(ZN|FE|MG|CA|NA|K|MN|CL|CU|CO|NI|CD|HG)/.test(l.compId);
+    dom.ligandPropStatus.textContent = isIonic(l) ? "Ion / cofactor" : isNucleic ? "Nucleotide / nucleic acid" : "Small-molecule ligand";
+    const rows = [
+      ["Atoms (heavy)", props.heavy],
+      ["MW (approx)", props.mw.toFixed(1) + " Da"],
+      ["H-bond donors", props.hbd + (props.hbd <= 5 ? " ✓" : " ✗")],
+      ["H-bond acceptors", props.hba + (props.hba <= 10 ? " ✓" : " ✗")],
+      ["TPSA (approx)", props.tpsa.toFixed(0) + " Å²"],
+      ["cLogP (approx)", props.logp.toFixed(2)],
+      ["Rotatable bonds", props.rotb],
+      ["Lipinski Ro5", props.lipinskiPass ? "PASS" : "FAIL"],
+      ["Veber", props.veberPass ? "PASS" : "FAIL"],
+    ];
+    dom.propGrid.innerHTML = rows
+      .map(([k, v]) => {
+        const cls = /FAIL|✗/.test(String(v)) ? "bad" : /PASS|✓/.test(String(v)) ? "good" : "";
+        return `<div class="k">${k}</div><div class="v ${cls}">${escapeHtml(String(v))}</div>`;
+      })
+      .join("");
+  }
+  function isIonic(l) {
+    return /^(ZN|FE|MG|CA|NA|K|MN|CL|CU|CO|NI|CD|HG|FE2|SO4|PO4)$/i.test(l.compId);
+  }
+
+  // ====== PROTEIN–LIGAND INTERACTION ANALYSIS ======
+  const HBOND_CUTOFF = 3.5;
+  const SALT_CUTOFF = 4.0;
+  const HYDRO_CUTOFF = 4.0;
+  const PI_CUTOFF = 5.5;
+  const AROMATIC_ELEMENTS = new Set(["C", "N", "O", "S"]);
+  const POSITIVE_RESIDUES = new Set(["ARG", "LYS", "HIS"]);
+  const NEGATIVE_RESIDUES = new Set(["ASP", "GLU"]);
+
+  function analyseInteractions() {
+    const lig = state.activeLigand;
+    if (!lig) {
+      dom.hbondStatus.textContent = "Select a ligand first (Ligands panel).";
+      return;
+    }
+    const model = state.models[state.currentPdbIndex];
+    if (!model) return;
+    let ligAtoms;
+    let protAtoms;
+    try {
+      ligAtoms = model.selectedAtoms({ resn: lig.compId });
+      protAtoms = model.selectedAtoms({ not: { resn: lig.compId } });
+    } catch (e) {
+      dom.hbondStatus.textContent = "Could not read model atoms.";
+      return;
+    }
+    if (!ligAtoms.length) {
+      dom.hbondStatus.textContent = `No atoms found for ${lig.compId}.`;
+      return;
+    }
+
+    const hbonds = [], salts = [], pi = [], hydro = [];
+    const seenHB = new Set();
+    for (const la of ligAtoms) {
+      if (!la.elem) continue;
+      const le = la.elem.toUpperCase();
+      for (const pa of protAtoms) {
+        if (!pa.elem || !pa.resn) continue;
+        const pe = pa.elem.toUpperCase();
+        const d = computeDistance(la, pa);
+        if (d > PI_CUTOFF) continue;
+
+        // H-bond: N/O–N/O within 3.5 Å (geometric proxy; 3Dmol has no hydrogens here)
+        if (d <= HBOND_CUTOFF && AROMATIC_ELEMENTS.has(le) && AROMATIC_ELEMENTS.has(pe)) {
+          const key = [la.serial, pa.serial].sort((x, y) => x - y).join("-");
+          if (!seenHB.has(key)) {
+            seenHB.add(key);
+            hbonds.push({ from: { chain: la.chain, resi: la.resi, atom: la.atom }, to: { chain: pa.chain, resi: pa.resi, resn: pa.resn, atom: pa.atom }, dist: d });
+          }
+        }
+        // Salt bridge: charged side-chain groups within 4 Å
+        if (d <= SALT_CUTOFF) {
+          const pos = POSITIVE_RESIDUES.has(pa.resn);
+          const neg = NEGATIVE_RESIDUES.has(pa.resn);
+          const ligCharged = /^(N|O|S)$/.test(le);
+          if ((pos || neg) && ligCharged) {
+            const key = "s" + pa.chain + pa.resi + "-" + la.serial;
+            if (!salts.some((s) => s.key === key)) salts.push({ key, chain: pa.chain, resi: pa.resi, resn: pa.resn, charge: pos ? "+" : "−", dist: d });
+          }
+        }
+        // π-interaction: planar ring atom near a planar ring atom
+        if (d <= PI_CUTOFF && AROMATIC_ELEMENTS.has(le) && AROMATIC_ELEMENTS.has(pe)) {
+          if (isPlanarAromatic(pa) && isPlanarAromatic(la)) {
+            const key = "p" + pa.chain + pa.resi + "-" + la.resi + la.chain;
+            if (!pi.some((x) => x.key === key)) pi.push({ key, chain: pa.chain, resi: pa.resi, resn: pa.resn, dist: d });
+          }
+        }
+        // Hydrophobic
+        if (d <= HYDRO_CUTOFF && (le === "C") && isHydrophobicResidue(pa.resn)) {
+          const key = "h" + pa.chain + pa.resi;
+          if (!hydro.some((x) => x.key === key)) hydro.push({ key, chain: pa.chain, resi: pa.resi, resn: pa.resn, dist: d });
+        }
+      }
+    }
+    state.interactions = { hbonds, salts, pi, hydro, ligand: lig.compId };
+    renderInteractions(lig);
+  }
+
+  function isPlanarAromatic(atom) {
+    const RES = new Set(["PHE", "TYR", "TRP", "HIS"]);
+    return RES.has(atom.resn);
+  }
+  function isHydrophobicResidue(resn) {
+    return new Set(["ALA", "VAL", "LEU", "ILE", "MET", "PHE", "TRP", "PRO", "GLY"]).has(resn);
+  }
+
+  function renderInteractions(lig) {
+    const I = state.interactions;
+    if (!I) {
+      dom.hbondStatus.textContent = "No interactions detected.";
+      dom.interactionSummary.innerHTML = "";
+      return;
+    }
+    const total = I.hbonds.length + I.salts.length + I.pi.length + I.hydro.length;
+    dom.hbondStatus.textContent = `${total} interactions for ${lig.compId} (cutoffs: H-bond ${HBOND_CUTOFF}Å, salt ${SALT_CUTOFF}Å, π ${PI_CUTOFF}Å).`;
+    const rows = [
+      ["H-bonds", I.hbonds.length, "hbond"],
+      ["Salt bridges", I.salts.length, "salt"],
+      ["π-interactions", I.pi.length, "pi"],
+      ["Hydrophobic contacts", I.hydro.length, "hydro"],
+    ];
+    dom.interactionSummary.innerHTML = rows
+      .map(([label, n, cls]) => `<div class="inter-row"><span>${label}</span><span class="inter-count ${cls}">${n}</span></div>`)
+      .join("")
+      + (I.salts.length ? `<div style="margin-top:8px;color:var(--text-2);font-size:10.5px">Salt bridges: ${I.salts.map((s) => `${s.resn}${s.resi}(${s.charge})`).join(", ")}</div>` : "")
+      + (I.hydro.length ? `<div style="margin-top:4px;color:var(--text-2);font-size:10.5px">Hydrophobic: ${[...new Set(I.hydro.map((h) => h.resn + h.resi))].join(", ")}</div>` : "");
+
+    // Visualise H-bonds as dashed lines
+    const model = state.models[state.currentPdbIndex];
+    if (model) {
+      try {
+        const ligAtoms = model.selectedAtoms({ resn: lig.compId });
+        const byKey = new Map();
+        for (const la of ligAtoms) {
+          const k = `${la.chain}:${la.resi}:${la.atom}`;
+          if (!byKey.has(k)) byKey.set(k, la);
+        }
+        for (const hb of I.hbonds) {
+          const pa = model.selectedAtoms({ chain: hb.to.chain, resi: hb.to.resi, atom: hb.to.atom })[0];
+          if (!pa) continue;
+          state.viewer.addCylinder({
+            start: { x: hb.from.x, y: hb.from.y, z: hb.from.z },
+            end: { x: pa.x, y: pa.y, z: pa.z },
+            radius: 0.04, color: 0x64b5f6, dashed: true,
+          });
+        }
+        state.viewer.render();
+      } catch (e) { /* ignore visual errors */ }
+    }
+  }
+  dom.btnHbond.addEventListener("click", analyseInteractions);
+  dom.btnClearInteractions.addEventListener("click", () => {
+    state.interactions = null;
+    dom.hbondStatus.textContent = "No interactions detected.";
+    dom.interactionSummary.innerHTML = "";
+    state.viewer.removeAllShapes();
+    applyAllStyles();
+    state.viewer.render();
+  });
+
+  // ====== MUTATION IMPACT ======
+  function checkMutation() {
+    const raw = (dom.mutInput.value || "").trim().toUpperCase();
+    const m = raw.match(/^([A-Z]):?(\d+)([A-Z])$/);
+    if (!m) {
+      dom.mutationStatus.textContent = "Format: chain:positionNEW — e.g. A:790T";
+      return;
+    }
+    const [, chain, pos, newRes] = m;
+    const model = state.models[state.currentPdbIndex];
+    if (!model) return;
+    const atoms = model.selectedAtoms({ chain, resi: parseInt(pos, 10) });
+    if (!atoms.length) {
+      dom.mutationStatus.textContent = `Residue ${chain}:${pos} not found in this structure.`;
+      return;
+    }
+    const ca = atoms.find((a) => a.atom === "CA") || atoms[0];
+    // Count neighbours within 8 Å (packing density proxy)
+    let neighbours = 0;
+    const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) } });
+    for (const a of all) {
+      const d = computeDistance(ca, a);
+      if (d <= 8) neighbours++;
+    }
+    let inPocket = "no";
+    for (const p of state.pockets) {
+      for (const r of p.residues) {
+        if (r === `${chain}:${pos}`) { inPocket = `yes (#${state.pockets.indexOf(p) + 1})`; break; }
+      }
+    }
+    dom.mutationStatus.innerHTML =
+      `<b>${chain}:${pos}${newRes}</b> — wt <b>${ca.resn}</b><br>` +
+      `Packing: <b>${neighbours}</b> Cβ-neighbours within 8 Å → ${neighbours > 220 ? "buried core (high impact)" : neighbours > 120 ? "partly buried (moderate)" : "surface-exposed (low)"}<br>` +
+      `In detected pocket: <b>${inPocket}</b>`;
+  }
+  dom.btnCheckMutation.addEventListener("click", checkMutation);
+  dom.mutInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); checkMutation(); }
+  });
+
+  // ====== NAVIGATION ======
+  dom.btnGoResidue.addEventListener("click", () => {
+    const chain = (dom.resiChain.value || "A").trim().toUpperCase() || "A";
+    const resi = parseInt(dom.resiNum.value, 10);
+    if (!resi) return;
+    focusResidue(chain, resi);
+  });
+  dom.resiNum.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); dom.btnGoResidue.click(); }
+  });
+
+  function renderChainToggles() {
+    const model = state.models[state.currentPdbIndex];
+    if (!model) return;
+    const chains = new Set();
+    let atoms;
+    try { atoms = model.selectedAtoms({}); } catch (e) { return; }
+    for (const a of atoms) if (a.chain) chains.add(a.chain);
+    const list = Array.from(chains).sort();
+    dom.chainToggles.innerHTML = list
+      .map((c, i) => {
+        const hex = "#" + STRUCT_CHAIN_PALETTE[i % STRUCT_CHAIN_PALETTE.length].toString(16).padStart(6, "0");
+        const off = state.hiddenChains.has(c) ? " off" : "";
+        return `<span class="chain-chip${off}" data-chain="${escapeHtml(c)}">
+          <span class="swatch-dot" style="background:${hex}"></span>${escapeHtml(c)}</span>`;
+      })
+      .join("");
+    dom.chainToggles.querySelectorAll(".chain-chip").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        const c = chip.dataset.chain;
+        if (state.hiddenChains.has(c)) state.hiddenChains.delete(c);
+        else state.hiddenChains.add(c);
+        applyChainVisibility();
+        renderChainToggles();
+      });
+    });
+  }
+  function applyChainVisibility() {
+    state.models.forEach((m, idx) => applyStyleToModel(m, idx));
+    for (const c of state.hiddenChains) {
+      state.viewer.setStyle({ chain: c }, { opacity: 0.06, cartoon: { opacity: 0.06 } });
+    }
+    state.viewer.render();
+  }
+
+  // ====== EXPORT ======
+  function exportPdb() {
+    const text = state._lastPdbText;
+    if (!text) {
+      dom.exportStatus.textContent = "Nothing to export yet.";
+      return;
+    }
+    const hidden = state.hiddenChains;
+    const lines = text.split(/\r?\n/);
+    const kept = [];
+    for (const line of lines) {
+      if ((line.startsWith("ATOM") || line.startsWith("HETATM")) && line.substring(21, 22).trim()) {
+        if (hidden.has(line.substring(21, 22).trim())) continue;
+      }
+      kept.push(line);
+    }
+    const blob = new Blob([kept.join("\n")], { type: "chemical/x-pdb" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const name = (state.currentProtein?.id || "structure").replace(/[^\w-]+/g, "_");
+    a.download = `${name}.pdb`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    dom.exportStatus.textContent = "Exported PDB.";
+  }
+  dom.btnExportPdb.addEventListener("click", exportPdb);
+
+  function exportCsv() {
+    if (!state.measurements.length) {
+      dom.exportStatus.textContent = "No measurements to export.";
+      return;
+    }
+    const rows = [["type", "value", "unit", "atoms"]];
+    for (const m of state.measurements) {
+      rows.push([
+        m.type,
+        m.value.toFixed(3),
+        m.type === "distance" ? "A" : "deg",
+        m.atoms.map((a) => `${a.chain || "_"}:${a.resn}${a.resi}.${a.atom}`).join(" "),
+      ]);
+    }
+    const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${(state.currentProtein?.id || "structure")}-measurements.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+    dom.exportStatus.textContent = "Exported CSV.";
+  }
+  dom.btnExportCsv.addEventListener("click", exportCsv);
 
   // ====== BOOTSTRAP ======
   async function init() {

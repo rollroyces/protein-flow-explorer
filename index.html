@@ -168,6 +168,7 @@
       <div class="tabs-header">
         <button class="tab-btn active" data-tab="controls">Controls</button>
         <button class="tab-btn" data-tab="tools">Tools</button>
+        <button class="tab-btn" data-tab="drug">Drug Design</button>
         <button class="tab-btn" data-tab="tour">Tour</button>
         <button class="tab-btn" data-tab="trajectory">Trajectory</button>
       </div>
@@ -340,9 +341,112 @@
           <div class="analysis-status muted small" id="contacts-status">No ligand contacts.</div>
           <div class="contact-list" id="contact-list"></div>
         </div>
+
+        <!-- ===== Structure metadata (molecular biologists) ===== -->
+        <div class="control-section">
+          <h3>Structure Metadata</h3>
+          <p class="muted small">
+            Experimental method, resolution, refinement statistics and deposited title —
+            fetched live from the RCSB data API for the loaded PDB entry.
+          </p>
+          <div class="meta-grid" id="meta-grid">
+            <div class="muted small">Loading metadata…</div>
+          </div>
+        </div>
+
+        <!-- ===== Ligand browser (drug discovery) ===== -->
+        <div class="control-section">
+          <h3>Ligands in this Entry</h3>
+          <p class="muted small">
+            Every non-polymer entity deposited with this structure. Click a ligand to
+            isolate and zoom to it.
+          </p>
+          <div class="ligand-list" id="ligand-list">
+            <div class="measurement-table-empty">No metadata loaded</div>
+          </div>
+        </div>
+
+        <!-- ===== Navigation (molecular biologists) ===== -->
+        <div class="control-section">
+          <h3>Navigate</h3>
+          <div class="control-row" style="margin-bottom:8px">
+            <span>Go to residue</span>
+            <span style="display:flex;gap:5px;min-width:auto">
+              <input type="text" id="resi-chain" placeholder="A" maxlength="1"
+                     style="width:44px;text-align:center;text-transform:uppercase" />
+              <input type="number" id="resi-num" placeholder="52" min="1"
+                     style="width:66px;font-family:ui-monospace,Menlo,monospace" />
+              <button class="btn btn-secondary btn-tiny" id="btn-go-residue">Go</button>
+            </span>
+          </div>
+          <div class="chain-toggles" id="chain-toggles"></div>
+        </div>
+
+        <!-- ===== Selection export ===== -->
+        <div class="control-section">
+          <h3>Export Selection</h3>
+          <p class="muted small">
+            Export the visible chains as a PDB file for PyMOL / ChimeraX, or export all
+            measurements as CSV.
+          </p>
+          <div class="highlight-actions">
+            <button class="btn btn-secondary" id="btn-export-pdb">⤓ Export PDB</button>
+            <button class="btn btn-secondary" id="btn-export-csv">⤓ Export CSV</button>
+          </div>
+          <div class="analysis-status muted small" id="export-status">Ready.</div>
+        </div>
       </div>
 
       <!-- ----- Tour Tab ----- -->
+      <!-- ----- Drug Design Tab ----- -->
+      <div class="tab-panel" data-tab-panel="drug">
+        <div class="control-section">
+          <h3>Interaction Analysis</h3>
+          <p class="muted small">
+            Classify protein–ligand contacts by chemistry: hydrogen bonds (donor–acceptor
+            ≤ 3.5 Å), salt bridges, hydrophobic and π-stacking. Standard cutoffs for
+            structure-based drug design triage.
+          </p>
+          <div class="highlight-actions">
+            <button class="btn btn-primary" id="btn-hbonds">🔬 Detect H-bonds</button>
+            <button class="btn btn-ghost" id="btn-clear-interactions">Clear</button>
+          </div>
+          <div class="analysis-status muted small" id="hbond-status">No interactions detected.</div>
+          <div class="interaction-summary" id="interaction-summary"></div>
+        </div>
+
+        <div class="control-section">
+          <h3>Ligand Properties</h3>
+          <p class="muted small">
+            Physicochemical descriptors for the selected ligand — useful for Lipinski
+            rule-of-five triage and fragment hopping.
+          </p>
+          <div class="ligand-prop-select">
+            <select id="ligand-select"></select>
+          </div>
+          <div class="analysis-status muted small" id="ligand-prop-status">No ligand selected.</div>
+          <div class="prop-grid" id="prop-grid"></div>
+        </div>
+
+        <div class="control-section">
+          <h3>Mutation Impact</h3>
+          <p class="muted small">
+            Enter a point mutation and the app reports whether it sits in a pocket, on a
+            hinge, or in the hydrophobic core — the three strongest determinants of
+            allosteric effect size.
+          </p>
+          <div class="control-row" style="margin-bottom:8px">
+            <span>Mutation</span>
+            <span style="display:flex;gap:5px;min-width:auto">
+              <input type="text" id="mut-input" placeholder="A:790T" maxlength="8"
+                     style="width:74px;text-transform:uppercase;font-family:ui-monospace,Menlo,monospace" />
+              <button class="btn btn-secondary btn-tiny" id="btn-check-mutation">Check</button>
+            </span>
+          </div>
+          <div class="analysis-status muted small" id="mutation-status">Enter a mutation like A:790T.</div>
+        </div>
+      </div>
+
       <div class="tab-panel" data-tab-panel="tour">
         <div class="tour-empty" id="tour-empty">
           <p>Select a protein to see its guided tour.</p>

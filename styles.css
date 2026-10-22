@@ -1357,6 +1357,168 @@ a:hover { text-decoration: underline; }
   text-align: right;
 }
 
+/* ============== STRUCTURE METADATA ============== */
+.meta-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 11.5px;
+}
+.meta-grid .k {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.meta-grid .v {
+  color: var(--text-0);
+  font-weight: 500;
+  word-break: break-word;
+}
+.meta-grid .v .res-badge {
+  background: rgba(79, 195, 247, 0.15);
+  color: var(--accent);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, Menlo, monospace;
+}
+
+/* ============== LIGAND LIST ============== */
+.ligand-list {
+  margin-top: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.ligand-row {
+  display: grid;
+  grid-template-columns: 46px 1fr auto;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.ligand-row:last-child { border-bottom: none; }
+.ligand-row:hover { background: var(--bg-3); }
+.ligand-row.active { background: var(--bg-3); box-shadow: inset 2px 0 0 var(--accent); }
+.ligand-cid {
+  font-family: ui-monospace, Menlo, monospace;
+  font-weight: 700;
+  color: var(--accent-warm);
+  background: var(--bg-0);
+  padding: 2px 5px;
+  border-radius: 3px;
+  text-align: center;
+  font-size: 10.5px;
+}
+.ligand-name {
+  color: var(--text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ligand-chain {
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--text-3);
+  font-size: 10px;
+}
+.ligand-prop-select select {
+  width: 100%;
+  background: var(--bg-3);
+  color: var(--text-0);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-family: inherit;
+}
+
+/* ============== PROPERTY GRID ============== */
+.prop-grid {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 11.5px;
+}
+.prop-grid .k { color: var(--text-2); white-space: nowrap; }
+.prop-grid .v {
+  color: var(--text-0);
+  font-family: ui-monospace, Menlo, monospace;
+  text-align: right;
+  font-weight: 500;
+}
+.prop-grid .v.good { color: var(--accent-2); }
+.prop-grid .v.bad { color: var(--danger); }
+
+/* ============== INTERACTION SUMMARY ============== */
+.interaction-summary {
+  margin-top: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-size: 11.5px;
+}
+.inter-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+.inter-row:last-child { border-bottom: none; }
+.inter-count { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+.inter-count.hbond { color: #64b5f6; }
+.inter-count.salt  { color: #ffd54f; }
+.inter-count.pi    { color: #ba68c8; }
+.inter-count.hydro { color: #4db6ac; }
+
+/* ============== CHAIN TOGGLES ============== */
+.chain-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.chain-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 13px;
+  background: var(--bg-3);
+  border: 1px solid var(--border-strong);
+  color: var(--text-1);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: ui-monospace, Menlo, monospace;
+  transition: var(--transition);
+  user-select: none;
+}
+.chain-chip .swatch-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.chain-chip.off {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+.chain-chip:hover { background: var(--border-strong); }
+
 /* ============== TOAST ============== */
 .toast {
   position: fixed;
