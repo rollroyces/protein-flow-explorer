@@ -265,6 +265,18 @@
     };
   }
 
+  // fetch with a timeout, so a stalled network never leaves the UI spinning forever.
+  const FETCH_TIMEOUT_MS = 15000;
+  async function fetchWithTimeout(url, opts) {
+    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, ctrl ? { ...(opts || {}), signal: ctrl.signal } : opts);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   // ====== THREE-LETTER → ONE-LETTER ======
   const AA3TO1 = {
     ALA: "A", ARG: "R", ASN: "N", ASP: "D", CYS: "C",
@@ -2576,7 +2588,7 @@
     dom.metaGrid.innerHTML = '<div class="muted small">Loading metadata…</div>';
     try {
       const id = pdbId.toLowerCase();
-      const entryRes = await fetch(`https://data.rcsb.org/rest/v1/core/entry/${id}`);
+      const entryRes = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/entry/${id}`);
       if (!entryRes.ok) throw new Error(`entry ${entryRes.status}`);
       const entry = await entryRes.json();
       const info = entry.rcsb_entry_info || {};
@@ -2596,7 +2608,7 @@
       const ligands = [];
       for (const eid of npIds) {
         try {
-          const r = await fetch(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${id}/${eid}`);
+          const r = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${id}/${eid}`);
           if (!r.ok) continue;
           const j = await r.json();
           const np = j.pdbx_entity_nonpoly || {};
@@ -2615,7 +2627,8 @@
       renderMetadataPanel();
       renderLigandList();
     } catch (err) {
-      dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable: ${escapeHtml(err.message)}</div>`;
+      dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable (${escapeHtml(err.message)}). The structure itself is unaffected.</div>`;
+      dom.ligandList.innerHTML = '<div class="measurement-table-empty">Metadata unavailable</div>';
     }
   }
 
