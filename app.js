@@ -2595,8 +2595,10 @@
       const method = (entry.exptl && entry.exptl[0] && entry.exptl[0].method) || "—";
       const resArr = info.resolution_combined || [];
       const resolution = resArr.length ? `${resArr[resArr.length - 1].toFixed(2)} Å` : "—";
-      const rfree = info.r_free != null ? info.r_free.map((r) => Number(r).toFixed(3)).join(", ") : "—";
-      const rwork = info.r_work != null ? info.r_work.map((r) => Number(r).toFixed(3)).join(", ") : "—";
+      // R-factors are not exposed in rcsb_entry_info; they live in the refine /
+      // refine_hist blocks, and many older entries omit them entirely.
+      const rwork = firstRefineStat(entry, "ls_r_factor_r_work", "ls_rfactor_r_work", "pdbx_rfactor_r_work");
+      const rfree = firstRefineStat(entry, "ls_r_factor_r_free", "ls_rfactor_r_free", "pdbx_rfactor_r_free");
       const deposited = entry.rcsb_accession_info?.deposit_date || "—";
       const released = entry.rcsb_accession_info?.initial_release_date || "—";
       const title = (entry.struct && entry.struct.title) || protein.name;
@@ -2612,7 +2614,10 @@
           if (!r.ok) continue;
           const j = await r.json();
           const np = j.pdbx_entity_nonpoly || {};
-          const cid = j.rcsb_nonpolymer_entity_container_identifiers?.comp_id;
+          // comp_id lives under pdbx_entity_nonpoly for many entries; the container
+          // identifiers block is not populated consistently, so fall back.
+          const cid = j.rcsb_nonpolymer_entity_container_identifiers?.comp_id
+            || j.pdbx_entity_nonpoly?.comp_id;
           const name = (np.name || "").trim();
           if (!cid || /^HOH$/i.test(cid)) continue;
           ligands.push({
@@ -2630,6 +2635,27 @@
       dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable (${escapeHtml(err.message)}). The structure itself is unaffected.</div>`;
       dom.ligandList.innerHTML = '<div class="measurement-table-empty">Metadata unavailable</div>';
     }
+  }
+
+  // Pull the first R-factor found under any of the known key spellings.
+  // Note: the mmCIF-derived keys use capital R (ls_R_factor_R_work), while
+  // some legacy payloads use lowercase — so compare case-insensitively.
+  function firstRefineStat(entry, ...keys) {
+    const blocks = []
+      .concat(entry.refine || [])
+      .concat(entry.refine_hist || []);
+    const wanted = keys.map((k) => k.toLowerCase());
+    for (const b of blocks) {
+      if (!b || typeof b !== "object") continue;
+      for (const k of Object.keys(b)) {
+        if (!wanted.includes(k.toLowerCase())) continue;
+        const v = b[k];
+        if (v != null && !Array.isArray(v) && Number.isFinite(Number(v))) {
+          return Number(v).toFixed(3);
+        }
+      }
+    }
+    return "—";
   }
 
   function renderMetadataPanel() {

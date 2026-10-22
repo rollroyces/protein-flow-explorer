@@ -56,12 +56,12 @@ const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { plddtToColor, midPoint, computeDistance, computeAngle,\n" +
   "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
   "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
-  "    isHydrophobicResidue, isIonic, extractPdbTitle, computeLigandProperties,\n" +
+  "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +
   "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF };\n})();");
 vm.runInThisContext(probe, { filename: "app.js" });
 const P = global.__PROBE__;
 const {
-  isPlanarAromatic, isHydrophobicResidue, isIonic, extractPdbTitle,
+  isPlanarAromatic, isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,
   HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF,
 } = P;
 
@@ -139,6 +139,17 @@ console.log("\nPDB TITLE extraction");
 check("extracts TITLE record",
   extractPdbTitle("HEADER    HYDROLASE\nTITLE     CRYSTAL STRUCTURE OF LYSOZYME\nCOMPND") === "CRYSTAL STRUCTURE OF LYSOZYME");
 check("returns null when absent", extractPdbTitle("ATOM      1  N   MET A   1") === null);
+
+
+console.log("\nRefinement-stat extraction (R-work / R-free)");
+// Real 4HHB payload shape: capital-R mmCIF keys under refine[0]
+const entry4hhb = { refine: [{ ls_R_factor_R_work: 0.135, ls_R_factor_R_free: 0.194 }] };
+check("finds capital-R R-work", firstRefineStat(entry4hhb, "ls_r_factor_r_work") === "0.135");
+check("finds capital-R R-free", firstRefineStat(entry4hhb, "ls_r_factor_r_free") === "0.194");
+check("returns em dash when absent", firstRefineStat({ refine: [{}] }, "ls_r_factor_r_work") === "\u2014");
+check("tolerates missing blocks",  firstRefineStat({}, "ls_r_factor_r_work") === "\u2014");
+check("skips non-numeric values",
+  firstRefineStat({ refine: [{ ls_R_factor_R_work: null }] }, "ls_r_factor_r_work") === "\u2014");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
