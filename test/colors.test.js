@@ -139,7 +139,7 @@ const grads = {};
 for (const m of annotBlock.matchAll(/id:\s*"([^"]+)"[\s\S]{0,400}?grad:\s*"linear-gradient\(90deg,([^)]+)\)"/g)) {
   grads[m[1]] = m[2].split(",").map((s) => parseInt(s.replace("#", ""), 16));
 }
-check("annotation key has 8 entries", Object.keys(grads).length === 8,
+check("annotation key has 9 entries", Object.keys(grads).length === 9,
       `(${Object.keys(grads).length})`);
 // The key must not advertise a colour the app cannot produce. Compare the
 // chain key against the real palette.
@@ -163,6 +163,14 @@ check("conservation key matches the ramp endpoints",
 check("hydrophobicity key matches the ramp endpoints",
       grads.hydrophobicity[0] === C.HYDROPHOBICITY_STOPS[0] &&
       grads.hydrophobicity[2] === C.HYDROPHOBICITY_STOPS[2]);
+// variant key: the five legend colours the panel prints
+check("variant key matches the legend colours",
+      grads.variant.length === 5 &&
+      grads.variant[0] === 0xb91c1c && grads.variant[1] === 0xf97316 &&
+      grads.variant[2] === 0xfbbf24 && grads.variant[3] === 0x84cc16 &&
+      grads.variant[4] === 0x22c55e,
+      `(${grads.variant.map(hex).join(" ")})`);
+
 // domain key: the two curated domain palettes (blue / grey / red)
 check("domain key matches the curated domain colours",
       grads.byDomain[0] === 0x2f7ed8 && grads.byDomain[1] === 0x9aa0a6 &&
@@ -254,10 +262,11 @@ check("the app does use colour fields", allLiterals.length > 0, `(${allLiterals.
 // The colour-scheme names the app advertises must all be real 3Dmol schemes
 // or app-owned schemes, never typos that would silently fall through.
 const KNOWN = new Set(["chain", "ss", "spectrum", "byElement", "residue",
-  "hydrophobicity", "bFactor", "byDomain", "pLDDT", "conservation", "uniform"]);
+  "hydrophobicity", "bFactor", "byDomain", "pLDDT", "conservation", "variant",
+  "uniform"]);
 const advertised = [...resolveBlock.matchAll(/case "([A-Za-z]+)":/g)].map((m) => m[1]);
 check("every colour case is a known scheme",
-      advertised.length === 11 && advertised.every((a) => KNOWN.has(a)),
+      advertised.length === 12 && advertised.every((a) => KNOWN.has(a)),
       `(${advertised.join(", ")})`);
 
 console.log(`\n${pass} passed, ${fail} failed`);

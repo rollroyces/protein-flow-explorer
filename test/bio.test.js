@@ -53,7 +53,7 @@ vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8")
 
 // The extracted pure modules publish themselves on the PFE namespace and must
 // be loaded before app.js, which destructures them.
-for (const m of ["seq", "geometry", "pockets", "colors"]) {
+for (const m of ["seq", "geometry", "pockets", "colors", "variants"]) {
   vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", `${m}.js`), "utf8"),
     { filename: `src/${m}.js` });
 }
@@ -132,7 +132,7 @@ const selectStart = html.indexOf('id="ctrl-color"');
 const selectEnd = html.indexOf("</select>", selectStart);
 const selectBlock = html.slice(selectStart, selectEnd);
 const options = [...selectBlock.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
-check("colour dropdown has 11 options", options.length === 11, `(${options.length})`);
+check("colour dropdown has 12 options", options.length === 12, `(${options.length})`);
 const badSpecs = [];
 for (const opt of options) {
   const s = P.resolveColor(opt, 1);

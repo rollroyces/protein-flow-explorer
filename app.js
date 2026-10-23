@@ -24,12 +24,16 @@
   // network or viewer dependency, so they can be unit-tested directly.
   // Destructuring keeps every existing call site unchanged.
   const { parseSequenceFromPDB, parseFastaSequences, nwAlign, progressiveMsa,
-          conservationScores, buildResidueIndex } = PFE.seq;
+          conservationScores, buildResidueIndex, AA3TO1 } = PFE.seq;
   const { midPoint, cross, dot, computeDistance, computeAngle, computeDihedral,
           computePerResidueRmsd } = PFE.geometry;
   const { buildAtomHash, countAtomsNear, rayHits, enclosureFraction } = PFE.pockets;
   const { STRUCT_CHAIN_PALETTE, ssColor, spectrumColor, bfactorColor,
           hydrophobicityColor, plddtColor, conservationColor } = PFE.colors;
+  const { SIGNIFICANCE_COLORS, SIGNIFICANCE_ORDER, parseProteinChange, parseSpdi,
+          extractProteinChange, gnomadVariantId, classifySignificance,
+          classifyImpactTier, classifyOncogenicity, significanceRank, rarityLabel,
+          buildUniprotMap, mergeByChange } = PFE.variants;
 
   // ====== GLOBAL STATE ======
   const state = {
@@ -86,6 +90,9 @@
     conservation: null,      // {byResidue: Map "chain:resi" -> 0..1, homologs: number}
     conservationJob: null,   // Promise tracking in-flight fetch
     variants: [],            // [{resi, chain, mutation, significance, color}]
+    variantByResidue: new Map(),   // "chain:resi" -> colour, for the variant scheme
+    variantRateLimited: false,     // gnomAD refused some frequency lookups
+    _uniprotInfo: null,      // cached {accession, gene, sequence} for the loaded structure
     pockets: [],             // [{id, center:[x,y,z], volume, score, residues:[{chain,resi}]}]
     ligandContacts: null,    // {ligandName, residue, contacts:[{chain,resi,resn,distance,type}]}
     rmsdPerResidue: null,   // array of {resi, chain, value}
@@ -302,6 +309,7 @@
   const NET_TIMEOUT_MS = 20000;
   const NET_RETRIES = 1;          // one retry covers the common transient case
   const NET_BACKOFF_MS = 600;
+  const NET_RATE_BACKOFF_MS = 3000;   // used when a server answers 429
 
   // Bumped on every protein switch so late responses from a previous load are
   // discarded instead of clobbering the new one.
@@ -334,10 +342,21 @@
       }
       const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
       const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, NET_TIMEOUT_MS);
+      let rateLimited = false;
       try {
         const res = await fetch(url, ctrl ? { ...opts, signal: ctrl.signal } : opts);
-        if (res.ok || res.status < 500) return res;   // 4xx is a real answer, not a retry
-        lastErr = new Error(`HTTP ${res.status}`);
+        // 429 is the one 4xx that is worth retrying: it means "you are going
+        // too fast", not "this does not exist". NCBI E-utilities answer 429
+        // when you exceed three requests a second without an API key, and
+        // the variant fetcher makes several requests in a row.
+        if (res.status === 429) {
+          rateLimited = true;
+          lastErr = new Error("HTTP 429 (rate limited)");
+        } else if (res.ok || res.status < 500) {
+          return res;                    // 4xx is a real answer, not a retry
+        } else {
+          lastErr = new Error(`HTTP ${res.status}`);
+        }
       } catch (err) {
         if (ctrl && err && err.name === "AbortError") {
           lastErr = new Error(`timeout after ${NET_TIMEOUT_MS / 1000}s`);
@@ -348,7 +367,8 @@
         clearTimeout(timer);
       }
       if (attempt < NET_RETRIES) {
-        await new Promise((r) => setTimeout(r, NET_BACKOFF_MS * (attempt + 1)));
+        const wait = rateLimited ? NET_RATE_BACKOFF_MS : NET_BACKOFF_MS * (attempt + 1);
+        await new Promise((r) => setTimeout(r, wait));
       }
     }
     throw lastErr || new Error("request failed");
@@ -971,6 +991,7 @@
 
   const DOMAIN_FALLBACK_COLOR = 0x9aa0a6;     // grey — residue outside any domain
   const CONSERVATION_MISSING_COLOR = 0xcccccc; // grey — residue not in the alignment
+  const VARIANT_BACKGROUND_COLOR = 0xbcc7d1;  // muted blue-grey — no variant here
 
   /** Colour by the annotated domain of the residue. */
   function domainColorFunc(atom) {
@@ -1017,6 +1038,32 @@
     return conservationColor(c);
   }
 
+  /**
+   * Colour by clinical significance of the variant at this residue. Residues
+   * with no variant get a muted neutral so the variants stand out.
+   */
+  function variantColorFunc(atom) {
+    const map = state.variantByResidue;
+    if (!map || !map.size) return VARIANT_BACKGROUND_COLOR;
+    const hit = map.get(`${atom.chain}:${atom.resi}`);
+    return hit !== undefined ? hit : VARIANT_BACKGROUND_COLOR;
+  }
+
+  /** Index the placed variants by chain:resi, keeping the most severe. */
+  function indexVariantsByResidue() {
+    const map = new Map();
+    for (const v of state.variants) {
+      if (!v.inStructure) continue;
+      const key = `${v.chain}:${v.resi}`;
+      const prev = map.get(key);
+      if (prev === undefined ||
+          significanceRank(v.significance) < significanceRank(prev.significance)) {
+        map.set(key, SIGNIFICANCE_COLORS[v.significance] || SIGNIFICANCE_COLORS.unknown);
+      }
+    }
+    state.variantByResidue = map;
+  }
+
   /** "#2f7ed8" -> 0x2f7ed8 */
   function hexToInt(hex) {
     if (typeof hex !== "string") return DOMAIN_FALLBACK_COLOR;
@@ -1054,6 +1101,8 @@
         return { colorfunc: plddtColorFunc, opacity };
       case "conservation":
         return { colorfunc: conservationColorFunc, opacity };
+      case "variant":
+        return { colorfunc: variantColorFunc, opacity };
       case "byElement":
         return { colorscheme: "Jmol", opacity };
       case "residue":
@@ -1801,88 +1850,402 @@
   // Minimal FASTA parser
 
   // ----- ClinVar variants via NCBI E-utilities -----
-  // ESearch finds ClinVar records mentioning the gene name, then ESummary fetches per-record details.
+  //
+  // The pipeline:
+  //   1. The gene symbol comes from the structure's UniProt accession, not a
+  //      hard-coded map, so this works for every curated entry and for
+  //      custom loads that resolve to UniProt.
+  //   2. ClinVar ESearch finds the records; ESummary is called in batches of
+  //      40 ids per request rather than one request per record.
+  //   3. Each record's `protein_change` gives the wild type and the position
+  //      in canonical UniProt numbering ("N1095S" -> Asn at 1095).
+  //   4. That position is mapped onto a PDB residue number by aligning the
+  //      structure's chain sequence to the UniProt sequence, constrained to
+  //      the residue range the construct actually covers (SIFTS). The wild
+  //      type is then checked against the structure: if it disagrees, the
+  //      mapping for that residue is rejected.
+  //   5. gnomAD gives the population allele frequency. That is what makes
+  //      "pathogenic" mean something -- a pathogenic variant at 3% allele
+  //      frequency in the population is noise, not a candidate.
+  //
+  // Significance is read from `germline_classification`. ClinVar used to
+  // publish `clinical_significance`; it no longer does, and reading the old
+  // field silently classified every record as "VUS".
+
+  const CLINVAR_SIGNIFICANT_MAX = 1000; // clinically significant records to pull
+  const CLINVAR_GENERAL_MAX = 50;      // additional records, for context
+  const CLINVAR_BATCH = 150;           // ids per ESummary request
+  const CLINVAR_PACING_MS = 400;        // stay under NCBI's 3 requests/second
+  const GNOMAD_CHUNK = 20;             // variants per gnomAD request
+  const GNOMAD_MAX_LOOKUPS = 60;       // bound the work for large genes
+
+  /** UniProt accession -> gene symbol + canonical sequence. Cached per accession. */
+  async function fetchUniProtInfo(accession) {
+    if (!accession) return null;
+    if (state._uniprotInfo && state._uniprotInfo.accession === accession) {
+      return state._uniprotInfo;
+    }
+    try {
+      const r = await net(`https://rest.uniprot.org/uniprotkb/${accession}?fields=gene_names,sequence`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const info = {
+        accession,
+        gene: (j.genes && j.genes[0] && j.genes[0].geneName && j.genes[0].geneName.value) || null,
+        sequence: (j.sequence && j.sequence.value) || "",
+      };
+      state._uniprotInfo = info;
+      return info;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Residue list of one chain, as parsed from the loaded PDB. */
+  function chainResidueList(chainId) {
+    if (!state.sequence) return [];
+    const ch = state.sequence.chains.find((c) => c.id === chainId);
+    if (!ch) return [];
+    return ch.residues.map((r) => ({ resi: r.resi, resn: r.resn, one: r.one }));
+  }
+
+  /**
+   * Map canonical UniProt positions onto PDB residue numbers for every chain
+   * the construct covers.
+   * @returns {Map<number, {chain: string, resi: number, resn: string}>}
+   */
+  function buildVariantResidueMap(upSeq, sifts) {
+    const map = new Map();
+    if (!upSeq || !state.sequence) return map;
+    const alignCache = new Map();
+    for (const s of sifts || []) {
+      for (const chainId of s.chains || []) {
+        const residues = chainResidueList(chainId);
+        if (!residues.length) continue;
+        const chainSeq = residues.map((r) => r.one || "X").join("");
+        if (!chainSeq) continue;
+        // Aligning the same chain sequence twice (homodimer) is wasted work.
+        let aln = alignCache.get(chainSeq);
+        if (!aln) {
+          aln = nwAlign(upSeq, chainSeq);
+          alignCache.set(chainSeq, aln);
+        }
+        const local = buildUniprotMap(aln.a, aln.b, residues, s.minPos, s.maxPos);
+        for (const [pos, v] of local) {
+          if (!map.has(pos)) map.set(pos, { chain: chainId, resi: v.resi, resn: v.resn });
+        }
+      }
+    }
+    return map;
+  }
+
+  /** Turn one ClinVar ESummary record into variant records. */
+  function parseClinVarRecord(rec) {
+    // ClinVar publishes three independent classification blocks: the germline
+    // significance, the somatic clinical-impact tier, and oncogenicity.
+    // germline_classification is the current field; clinical_significance is
+    // the historical one, kept as a fallback for older cached responses.
+    const gc = rec.germline_classification || rec.clinical_significance || {};
+    const ic = rec.clinical_impact_classification || {};
+    const oc = rec.oncogenicity_classification || {};
+    const significance = classifySignificance(gc.description || "");
+    const review = gc.review_status || "";
+    const tier = classifyImpactTier(ic.description || "");
+    const oncogenicity = classifyOncogenicity(oc.description || "");
+    const vs = (rec.variation_set || [])[0] || {};
+    const gnomadId = gnomadVariantId(vs);
+    // The variation name refers to the canonical (MANE) transcript, so its
+    // residue numbering is UniProt's. The `protein_change` field lists the
+    // same variant under every transcript ClinVar knows about, each with its
+    // own numbering, so it is only a fallback.
+    let changes = extractProteinChange(vs.variation_name);
+    if (!changes.length) changes = parseProteinChange(rec.protein_change);
+    return {
+      id: rec.accession_version || rec.uid || "",
+      title: rec.title || "",
+      trait: gc.description || "",
+      significance,
+      review,
+      tier,
+      oncogenicity,
+      gnomadId,
+      changes,
+    };
+  }
+
+  /** Ask gnomAD for the population allele frequency of each variant. */
+  async function fetchGnomadFrequencies(variants) {
+    state.variantRateLimited = false;
+    const byId = new Map();
+    // Most significant first, so the bounded number of lookups goes to the
+    // variants that matter rather than to whichever came first.
+    const ordered = [...variants].sort(
+      (a, b) => significanceRank(a.significance) - significanceRank(b.significance) || a.pos - b.pos);
+    for (const v of ordered) {
+      if (v.gnomadId && !byId.has(v.gnomadId)) byId.set(v.gnomadId, v);
+    }
+    const ids = [...byId.keys()].slice(0, GNOMAD_MAX_LOOKUPS);
+    for (let i = 0; i < ids.length; i += GNOMAD_CHUNK) {
+      await gnomadChunk(ids.slice(i, i + GNOMAD_CHUNK), byId);
+    }
+  }
+
+  const GNOMAD_URL = "https://gnomad.broadinstitute.org/api";
+  const GNOMAD_CONCURRENCY = 3;    // parallel single lookups on the slow path
+  const GNOMAD_PAUSE_MS = 300;     // gnomAD's rate limit is generous but finite
+
+  /**
+   * One gnomAD query for one variant id.
+   *
+   * The three outcomes are kept apart on purpose. gnomAD answers a
+   * rate-limited request with HTTP 400 and the message "Query rate limit
+   * exceeded" -- not 429 -- so a naive client reports "not in gnomAD" for
+   * every variant, which is a different and much less useful statement.
+   *
+   * @returns {{af: number, source: string}|{absent: true}|{rateLimited: true}|null}
+   */
+  async function gnomadOne(id) {
+    const query = `{ variant(variantId: ${JSON.stringify(id)}, dataset: gnomad_r4) ` +
+      `{ variant_id exome { ac an af } genome { ac an af } } }`;
+    try {
+      const r = await net(GNOMAD_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      const j = r.ok ? await r.json() : null;
+      const message = j && j.errors && j.errors.length ? String(j.errors[0].message || "") : "";
+      if (/rate limit|too many/i.test(message)) return { rateLimited: true };
+      if (!r.ok) return { absent: true };
+      if (j.errors && j.errors.length) return { absent: true };   // "Variant not found"
+      const v = j.data && j.data.variant;
+      if (!v) return { absent: true };
+      if (v.genome && typeof v.genome.af === "number") return { af: v.genome.af, source: "genome" };
+      if (v.exome && typeof v.exome.af === "number") return { af: v.exome.af, source: "exome" };
+      return { absent: true };
+    } catch (e) {
+      return { rateLimited: /429|rate/i.test(e.message || "") };
+    }
+  }
+
+  /**
+   * Look up a batch of variant ids.
+   *
+   * gnomAD answers "Variant not found" as an error when *any* id in the batch
+   * is absent, which for a cancer-gene list is most of them -- the well
+   * known drivers are somatic mutations and gnomAD is a population reference.
+   * So a failed batch is retried one id at a time, a few in parallel, and an
+   * id that is still missing is simply reported as "not in gnomAD".
+   */
+  async function gnomadChunk(ids, byId) {
+    if (!ids.length) return;
+    const parts = ids.map((id, k) =>
+      `v${k}: variant(variantId: ${JSON.stringify(id)}, dataset: gnomad_r4) ` +
+      `{ variant_id exome { ac an af } genome { ac an af } }`);
+    const query = `{ ${parts.join(" ")} }`;
+    let data = null;
+    try {
+      const r = await net(GNOMAD_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      if (j.errors && j.errors.length) throw new Error(j.errors[0].message || "gnomAD error");
+      data = j.data || {};
+    } catch (err) {
+      data = null;
+    }
+    if (data) {
+      ids.forEach((id, k) => {
+        const v = data["v" + k];
+        const target = byId.get(id);
+        if (!target) return;
+        if (!v) { target.afAbsent = true; return; }
+        if (v.genome && typeof v.genome.af === "number") {
+          target.af = v.genome.af; target.afSource = "genome";
+        } else if (v.exome && typeof v.exome.af === "number") {
+          target.af = v.exome.af; target.afSource = "exome";
+        } else {
+          target.afAbsent = true;
+        }
+      });
+      return;
+    }
+    // Slow path: one id at a time, a few in parallel.
+    for (let i = 0; i < ids.length; i += GNOMAD_CONCURRENCY) {
+      const group = ids.slice(i, i + GNOMAD_CONCURRENCY);
+      const results = await Promise.all(group.map((id) => gnomadOne(id)));
+      group.forEach((id, k) => {
+        const hit = results[k];
+        const target = byId.get(id);
+        if (!hit || !target) return;
+        if (hit.rateLimited) { state.variantRateLimited = true; return; }
+        if (hit.absent) { target.afAbsent = true; return; }
+        target.af = hit.af;
+        target.afSource = hit.source;
+      });
+      await new Promise((r) => setTimeout(r, GNOMAD_PAUSE_MS));
+    }
+  }
+
   async function fetchVariants() {
     if (!state.currentProtein) {
       showCustomError("Load a protein first.");
       return;
     }
-    dom.variantsStatus.textContent = "Querying ClinVar…";
+    dom.variantsStatus.textContent = "Looking up UniProt accession…";
     dom.btnFetchVariants.disabled = true;
 
     try {
-      const prot = state.currentProtein;
-      // Derive a likely gene name from the curated entry
-      const geneGuess =
-        prot.id === "p53" ? "TP53" :
-        prot.id === "egfr-kinase" ? "EGFR" :
-        prot.id === "kras-g12c" ? "KRAS" :
-        prot.id === "hiv-protease" ? "PR" :
-        prot.id === "calmodulin" ? "CALM1" :
-        prot.id === "insulin" ? "INS" :
-        prot.id === "hemoglobin" ? "HBB" :
-        prot.id === "lysozyme" ? "LYZ" :
-        prot.id === "myoglobin" ? "MB" :
-        null;
+      const pdbId = state.currentProtein.pdbIds[state.currentPdbIndex];
 
-      if (!geneGuess) {
-        dom.variantsStatus.textContent = "No gene-symbol mapping for this curated entry. Custom-loaded structures need a UniProt accession (we'll auto-detect next iteration).";
+      // The gene symbol and the canonical sequence both come from UniProt.
+      const upInfo = await fetchUniProtInfo(state.meta && state.meta.uniprot);
+      if (!upInfo || !upInfo.gene) {
+        dom.variantsStatus.textContent =
+          "No UniProt accession for this structure, so the gene symbol could not be determined. " +
+          "Custom-loaded structures need a UniProt accession (we'll auto-detect next iteration).";
         return;
       }
+      const gene = upInfo.gene;
 
-      // ESearch
-      const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(geneGuess + "[gene]")}&retmax=200&retmode=json`;
-      const r = await net(esearchUrl);
-      if (!r.ok) throw new Error(`ClinVar esearch ${r.status}`);
-      const j = await r.json();
-      const ids = (j.esearchresult && j.esearchresult.idlist) || [];
+      // ClinVar ESearch. Several queries, because ClinVar sorts by record id
+      // descending -- the newest records first -- and the well-established
+      // ones are often decades old. A single capped query would miss
+      // EGFR T790M entirely. Multi-word field values must be quoted or
+      // they match nothing at all.
+      dom.variantsStatus.textContent = `Querying ClinVar for ${gene}…`;
+      const esearch = async (term, max) => {
+        const u = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar` +
+          `&term=${encodeURIComponent(term)}&retmax=${max}&retmode=json`;
+        const res = await net(u);
+        if (!res.ok) return [];
+        const jj = await res.json();
+        return (jj.esearchresult && jj.esearchresult.idlist) || [];
+      };
+      const significantTerms = [
+        "pathogenic[Clinical significance]",
+        "likely pathogenic[Clinical significance]",
+        "conflicting[Clinical significance]",
+        '"drug response"[Clinical significance]',
+        '"risk factor"[Clinical significance]',
+      ];
+      const significantIds = await esearch(
+        `${gene}[gene] AND (${significantTerms.join(" OR ")})`,
+        CLINVAR_SIGNIFICANT_MAX);
+      // NCBI E-utilities allow three requests a second without an API key.
+      await new Promise((r) => setTimeout(r, CLINVAR_PACING_MS));
+      const generalIds = await esearch(`${gene}[gene]`, CLINVAR_GENERAL_MAX);
+      const ids = [...new Set([...significantIds, ...generalIds])];
       if (ids.length === 0) {
-        dom.variantsStatus.textContent = `No ClinVar records found for ${geneGuess}.`;
+        dom.variantsStatus.textContent = `No ClinVar records found for ${gene}.`;
         return;
       }
 
-      // ESummary (we'll just use a single summary call to get total counts; per-variant details
-      // would require many more calls. For a pragmatic demo, we count by clinical significance.)
-      dom.variantsStatus.textContent = `Found ${ids.length} ClinVar records. Summarising…`;
-
-      // Pull a small summary batch (10 IDs at a time) — practical limit
-      const variants = [];
-      const batch = ids.slice(0, 40); // cap for speed
-      for (const id of batch) {
+      // ClinVar ESummary, batched. This is the slow part -- a gene like EGFR
+      // has several hundred significant records -- so report progress.
+      dom.variantsStatus.textContent =
+        `Found ${ids.length} ClinVar records for ${gene}. Summarising…`;
+      const records = [];
+      for (let i = 0; i < ids.length; i += CLINVAR_BATCH) {
+        const batch = ids.slice(i, i + CLINVAR_BATCH).join(",");
+        dom.variantsStatus.textContent =
+          `Summarising ${Math.min(i + CLINVAR_BATCH, ids.length)}/${ids.length} ClinVar records…`;
         try {
-          const surl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${id}&retmode=json`;
-          const sr = await net(surl);
-          if (!sr.ok) continue;
-          const sj = await sr.json();
-          const r2 = sj.result && sj.result[id];
-          if (!r2) continue;
-          const trait = (r2.clinical_significance && r2.clinical_significance.description) || "";
-          const germ = (r2.clinical_significance && r2.clinical_significance.review_status) || "";
-          // We don't have a simple residue position; we surface the count by significance.
-          const sig = trait.toLowerCase().includes("pathogenic") && !trait.toLowerCase().includes("benign")
-            ? (trait.toLowerCase().includes("likely") ? "likely_pathogenic" : "pathogenic")
-            : trait.toLowerCase().includes("benign")
-            ? (trait.toLowerCase().includes("likely") ? "likely_benign" : "benign")
-            : "vus";
-          variants.push({ id, sig, trait, germ });
-        } catch (e) { /* skip */ }
+          const sr = await net(
+            `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${batch}&retmode=json`);
+          if (!sr.ok) {
+            console.warn(`ClinVar ESummary batch failed: HTTP ${sr.status}`);
+          } else {
+            const sj = await sr.json();
+            const res = sj.result || {};
+            for (const uid of res.uids || []) {
+              if (res[uid]) records.push(parseClinVarRecord(res[uid]));
+            }
+          }
+        } catch (e) {
+          // Never swallow this silently: a skipped batch looks exactly like
+          // "this gene has no variants", which is how a whole panel can come
+          // back empty with no explanation.
+          console.warn(`ClinVar ESummary batch failed: ${e.message}`);
+        }
+        await new Promise((r) => setTimeout(r, CLINVAR_PACING_MS));
+      }
+      if (!records.length) {
+        dom.variantsStatus.textContent = "ClinVar returned no usable records.";
+        return;
       }
 
-      // Count by significance
-      const tally = { pathogenic: 0, likely_pathogenic: 0, vus: 0, likely_benign: 0, benign: 0 };
-      for (const v of variants) tally[v.sig] = (tally[v.sig] || 0) + 1;
-      const total = variants.length;
-      state.variants = variants;
+      // Expand each record into one entry per protein change.
+      const all = [];
+      for (const rec of records) {
+        for (const ch of rec.changes) {
+          all.push({
+            pos: ch.pos, wt: ch.wt, mut: ch.mut,
+            significance: rec.significance,
+            review: rec.review,
+            tier: rec.tier,
+            oncogenicity: rec.oncogenicity,
+            trait: rec.trait,
+            gnomadId: rec.gnomadId,
+            id: rec.id,
+            title: rec.title,
+          });
+        }
+      }
+      const merged = mergeByChange(all);
 
-      dom.variantsStatus.innerHTML =
-        `<b>${geneGuess}</b> · ${total} variants from ${ids.length} ClinVar records:<br>` +
-        `<span style="color:#b91c1c">● ${tally.pathogenic} pathogenic</span> · ` +
-        `<span style="color:#f97316">● ${tally.likely_pathogenic} likely path.</span> · ` +
-        `<span style="color:#fbbf24">● ${tally.vus} VUS</span> · ` +
-        `<span style="color:#84cc16">● ${tally.likely_benign} likely ben.</span> · ` +
-        `<span style="color:#22c55e">● ${tally.benign} benign</span><br>` +
-        `<span class="muted small">Variant → residue mapping requires per-position lookup; counts shown here.</span>`;
-      showToast(`Loaded ${variants.length} ClinVar entries for ${geneGuess}`, "success");
+      // Place them on the structure.
+      dom.variantsStatus.textContent =
+        `Mapping ${merged.length} protein changes onto ${pdbId}…`;
+      const resMap = buildVariantResidueMap(upInfo.sequence, state.meta && state.meta.sifts);
+      let placed = 0, wrongWildType = 0;
+      for (const v of merged) {
+        const hit = resMap.get(v.pos);
+        if (!hit) { v.inStructure = false; continue; }
+        // The wild type is a free correctness check on the mapping.
+        const structureAa = AA3TO1[hit.resn] || "X";
+        if (v.wt !== "*" && structureAa !== v.wt) {
+          v.inStructure = false;
+          v.mappingConflict = `${v.wt} vs ${structureAa}`;
+          wrongWildType++;
+          continue;
+        }
+        v.inStructure = true;
+        v.chain = hit.chain;
+        v.resi = hit.resi;
+        v.resn = hit.resn;
+        v.mutation = `${v.wt}${v.pos}${v.mut}`;
+        v.color = SIGNIFICANCE_COLORS[v.significance] || SIGNIFICANCE_COLORS.unknown;
+        placed++;
+      }
+
+      // Population frequency.
+      const toFreq = merged.filter((v) => v.inStructure && v.gnomadId);
+      if (toFreq.length) {
+        dom.variantsStatus.textContent =
+          `Placed ${placed} of ${merged.length}. Fetching population frequencies…`;
+        await fetchGnomadFrequencies(toFreq);
+        for (const v of toFreq) {
+          v.rarity = rarityLabel(v.af);
+        }
+      }
+
+      state.variants = merged;
+      indexVariantsByResidue();
+      renderVariantPanel(gene, records.length, merged, placed, wrongWildType);
+      renderVariantSpheres();
+      // Show the significance colouring straight away, so the fetch does
+      // something visible on the structure.
+      if (placed > 0) {
+        state.currentColor = "variant";
+        dom.ctrlColor.value = "variant";
+        applyAllStyles();
+      }
+      state.viewer.render();
+      showToast(`Loaded ${merged.length} protein changes for ${gene}`, "success");
     } catch (err) {
       dom.variantsStatus.textContent = `ClinVar fetch failed: ${err.message}`;
       showCustomError(`ClinVar fetch failed: ${err.message}`);
@@ -1890,10 +2253,111 @@
       dom.btnFetchVariants.disabled = false;
     }
   }
+
   dom.btnFetchVariants.addEventListener("click", fetchVariants);
+
+  /** Write the variant table and the summary line into the panel. */
+  function renderVariantPanel(gene, recordCount, variants, placed, wrongWildType) {
+    const tally = {};
+    for (const v of variants) tally[v.significance] = (tally[v.significance] || 0) + 1;
+    const dot = {
+      pathogenic: "dot-path", likely_pathogenic: "dot-likpath", vus: "dot-vus",
+      conflicting: "dot-conflict", likely_benign: "dot-likben", benign: "dot-ben",
+      drug_response: "dot-drugresp", risk_factor: "dot-risk",
+      protective: "dot-ben", unknown: "dot-vus",
+    };
+    const order = ["pathogenic", "likely_pathogenic", "drug_response", "risk_factor",
+                   "conflicting", "vus", "likely_benign", "benign", "protective"];
+    const summary = order.filter((k) => tally[k])
+      .map((k) => `<span class="dot ${dot[k]}"></span> ${tally[k]} ${k.replace("_", " ")}`)
+      .join(" · ");
+
+    const rows = variants.filter((v) => v.inStructure)
+      .sort((a, b) => significanceRank(a.significance) - significanceRank(b.significance) || a.pos - b.pos);
+
+    const table = rows.length ? `
+      <div class="variant-table" id="variant-table">
+        <div class="variant-table-head">
+          <span>Change</span><span>Residue</span><span>Significance</span><span>Frequency</span>
+        </div>
+        ${rows.map((v) => {
+          const extra = [v.tier, v.oncogenicity].filter(Boolean).join(" \u00b7 ");
+          const review = v.review && /expert panel|practice guideline|multiple submitters/i.test(v.review)
+            ? v.review.replace(/^reviewed by /, "") : "";
+          const note = [review, extra].filter(Boolean).join(" \u00b7 ");
+          return `
+          <div class="variant-row" data-chain="${escapeHtml(v.chain)}" data-resi="${v.resi}">
+            <span class="variant-mut"><span class="dot ${dot[v.significance] || "dot-vus"}"></span>${escapeHtml(v.mutation)}</span>
+            <span class="variant-resi">${escapeHtml(v.chain)}:${v.resi} ${escapeHtml(v.resn)}</span>
+            <span class="variant-sig">${escapeHtml(String(v.significance).replace(/_/g, " "))}${
+              note ? `<em class="variant-note">${escapeHtml(note)}</em>` : ""}</span>
+            <span class="variant-af">${v.af !== undefined && v.af !== null
+              ? `${v.af.toExponential(1)} <em>${escapeHtml(v.rarity || "")}</em>`
+              : v.afAbsent
+              ? "<em class='muted'>not in gnomAD</em>"
+              : "<em class='muted'>not looked up</em>"}</span>
+          </div>`;
+        }).join("")}
+      </div>` : "";
+
+    const notPlaced = variants.length - placed;
+    dom.variantsStatus.innerHTML =
+      `<b>${escapeHtml(gene)}</b> · ${variants.length} protein changes from ${recordCount} ClinVar records<br>` +
+      `<span class="muted small">${summary}</span><br>` +
+      `<span class="muted small">${placed} fall inside this structure` +
+      (notPlaced ? `, ${notPlaced} lie outside the construct` : "") +
+      (wrongWildType ? ` · ${wrongWildType} rejected: wild type did not match` : "") +
+      `</span>` +
+      (state.variantRateLimited
+        ? `<br><span class="muted small">gnomAD rate-limited some frequency lookups; ` +
+          `those rows show no frequency rather than a wrong one.</span>`
+        : "") +
+      table;
+
+    // Clicking a row focuses that residue.
+    dom.variantsStatus.querySelectorAll(".variant-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const chain = row.dataset.chain, resi = parseInt(row.dataset.resi, 10);
+        const model = state.models[state.currentPdbIndex];
+        if (!model) return;
+        const atoms = model.selectedAtoms({ chain, resi });
+        if (!atoms.length) return;
+        state.viewer.zoomTo({ chain, resi });
+        state.viewer.render();
+      });
+    });
+  }
+
+  /** Draw a sphere at every placed variant, coloured by significance. */
+  function renderVariantSpheres() {
+    state.viewer.removeAllShapes();
+    const placed = state.variants.filter((v) => v.inStructure);
+    if (!placed.length) return;
+    const model = state.models[state.currentPdbIndex];
+    if (!model) return;
+    for (const v of placed) {
+      const atoms = model.selectedAtoms({ chain: v.chain, resi: v.resi });
+      if (!atoms.length) continue;
+      const anchor = atoms.find((a) => a.atom === "CA") || atoms[0];
+      state.viewer.addSphere({
+        center: { x: anchor.x, y: anchor.y, z: anchor.z },
+        radius: 1.6,
+        color: v.color,
+        opacity: 0.85,
+      });
+    }
+  }
+
   dom.btnClearVariants.addEventListener("click", () => {
     state.variants = [];
+    state.variantByResidue = new Map();
     dom.variantsStatus.textContent = "No variants loaded.";
+    // Remove the variant spheres and fall back to a scheme that still works.
+    state.viewer.removeAllShapes();
+    if (state.currentColor === "variant") {
+      state.currentColor = "chain";
+      dom.ctrlColor.value = "chain";
+    }
     applyAllStyles();
     state.viewer.render();
   });
@@ -2616,6 +3080,7 @@
       const chains = [];
       const polymerIds = entry.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
       let uniprot = null;
+      const sifts = [];
       for (const eid of polymerIds) {
         try {
           const er = await net(`https://data.rcsb.org/rest/v1/core/polymer_entity/${id}/${eid}`, undefined, gen);
@@ -2630,10 +3095,28 @@
               if (ref.database_name === "UniProt") { uniprot = ref.database_accession; break; }
             }
           }
+          // The UniProt residue range this entity covers. Needed to place
+          // canonical-protein variants onto the construct: a ClinVar position
+          // is in canonical UniProt numbering, but a deposited structure is
+          // usually only a fragment of it.
+          for (const al of ej.rcsb_polymer_entity_align || []) {
+            if (al.reference_database_name !== "UniProt") continue;
+            for (const reg of al.aligned_regions || []) {
+              if (!reg.ref_beg_seq_id || !reg.length) continue;
+              sifts.push({
+                entityId: eid,
+                uniprot: al.reference_database_accession,
+                chains: chainsForEntity,
+                minPos: reg.ref_beg_seq_id,
+                maxPos: reg.ref_beg_seq_id + reg.length - 1,
+              });
+            }
+          }
         } catch (e) { /* skip entity */ }
       }
       state.meta.chains = chains;
       state.meta.uniprot = uniprot;
+      state.meta.sifts = sifts;
       state.meta.polymerEntities = polymerIds.length;
       state.meta.nonPolymerEntities = (entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || []).length;
 
@@ -3174,6 +3657,12 @@
       needs: "conservation",
     },
     {
+      id: "variant", name: "Variant significance", quantity: "ClinVar clinical significance",
+      grad: "linear-gradient(90deg,#b91c1c,#f97316,#fbbf24,#84cc16,#22c55e)",
+      use: "Where the known disease variants sit, and how severe they are.",
+      needs: "variants",
+    },
+    {
       id: "hydrophobicity", name: "Hydrophobicity", quantity: "Kyte–Doolittle side-chain score",
       grad: "linear-gradient(90deg,#0053d6,#f5c542,#cc1f1f)",
       use: "Reading a surface for a ligand-facing hydrophobic face.",
@@ -3248,6 +3737,7 @@
       alphafold: !!isAF,
       conservation: !!state.conservation,
       domains: !!(state.currentProtein && state.currentProtein.domains && state.currentProtein.domains.length),
+      variants: !!(state.variants && state.variants.some((v) => v.inStructure)),
     };
     dom.annotKey.innerHTML = ANNOTATIONS.map((a) => {
       const ok = !a.needs || available[a.needs];

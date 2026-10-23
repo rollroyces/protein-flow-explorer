@@ -24,7 +24,7 @@ global.fetch=async(url)=>{calls.push(url);return behaviour(url);};
 const ROOT=require("path").join(__dirname,"..");
 vm.runInThisContext(fs.readFileSync(ROOT+"/data/proteins.js","utf8"),{filename:"proteins.js"});
 // Extracted pure modules must load before app.js (it destructures them).
-for(const m of ["seq","geometry","pockets","colors"])
+for(const m of ["seq","geometry","pockets","colors","variants"])
   vm.runInThisContext(fs.readFileSync(ROOT+"/src/"+m+".js","utf8"),{filename:"src/"+m+".js"});
 let src=fs.readFileSync(ROOT+"/app.js","utf8");
 src=src.replace(/\n\}\)\(\);\s*$/,
@@ -73,4 +73,21 @@ global.setTimeout=realTimeout; global.clearTimeout=realClear;
   calls=[];
   const r6=await T.net("https://x/fresh",undefined,g2);
   console.log("6. current gen works :", r6.status, calls.length===1?"PASS":"FAIL");
+
+  // 7. 429 is the one 4xx worth retrying: it means "too fast", not "no such
+  //    thing". NCBI E-utilities answer 429 above three requests a second, and
+  //    the variant fetcher makes several in a row.
+  calls=[];
+  let n7=0;
+  behaviour=()=>{n7++;return n7===1?{ok:false,status:429}:{ok:true,status:200};};
+  const r7=await T.net("https://x/429");
+  console.log("7. 429 retried       :", r7.status, "calls="+calls.length, (calls.length===2&&r7.status===200)?"PASS":"FAIL");
+
+  // 8. 429 exhausts retries then throws, rather than returning a body the
+  //    caller would silently treat as data
+  calls=[];
+  behaviour=()=>({ok:false,status:429});
+  let threw8=false;
+  try{await T.net("https://x/429again");}catch(e){threw8=true;}
+  console.log("8. 429 gives up      :", "threw="+threw8, "calls="+calls.length, (threw8&&calls.length===2)?"PASS":"FAIL");
 })();

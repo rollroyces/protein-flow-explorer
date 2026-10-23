@@ -33,10 +33,12 @@ jobs:
           node --check src/geometry.js
           node --check src/pockets.js
           node --check src/colors.js
+          node --check src/variants.js
           node --check test/bio.test.js
           node --check test/net.test.js
           node --check test/analysis.test.js
           node --check test/colors.test.js
+          node --check test/variants.test.js
 
       # Unit tests for the extracted pure modules. These need no DOM stub,
       # which is exactly what the extraction bought us.
@@ -47,6 +49,10 @@ jobs:
       # `color` field, which is a literal colour, not a scheme name).
       - name: Colour tests
         run: node test/colors.test.js
+
+      # Variant module: ClinVar parsing, gnomAD ids, significance, residue map.
+      - name: Variant tests
+        run: node test/variants.test.js
 
       # Unit tests over the analysis routines.
       - name: Analysis unit tests

@@ -122,6 +122,48 @@ const short = seq.nwAlign("ACDE", "ACDEFGHI");
 check("gap introduced for the tail", short.a.includes("-") && !short.b.includes("-"),
       `("${short.a}")`);
 
+// Regression: the traceback used to run off the end of the row whenever the
+// two sequences differed enough in length. At j=0 with i>0 it read an
+// unwritten traceback cell, took the "left" branch, and indexed b[-1] --
+// undefined -- so j counted down forever and the alignment string grew until
+// V8 threw "Invalid string length". It affected any alignment of sequences
+// with very different lengths, e.g. a 1210-residue UniProt sequence against
+// a 312-residue crystallographic construct.
+console.log("\nAlignment termination (regression)");
+{
+  const long_ = seq.nwAlign("M".repeat(1200), "M".repeat(312));
+  check("very different lengths terminate", long_.a.length === long_.b.length,
+        `(len ${long_.a.length}, ${long_.b.length})`);
+  check("the short sequence survives intact",
+        long_.b.replace(/-/g, "").length === 312);
+  const empty = seq.nwAlign("ACDE", "");
+  check("an empty second sequence terminates", empty.a.length === empty.b.length);
+  const emptyFirst = seq.nwAlign("", "ACDE");
+  check("an empty first sequence terminates", emptyFirst.a.length === emptyFirst.b.length);
+  // A gap must never be aligned to a gap.
+  let bothGapped = false;
+  for (let k = 0; k < short.a.length; k++) {
+    if (short.a[k] === "-" && short.b[k] === "-") bothGapped = true;
+  }
+  check("a gap is never aligned to a gap", !bothGapped);
+  // Many random pairs of different lengths, to shake out any remaining
+  // non-termination.
+  let terminated = 0;
+  const AAs = "ACDEFGHIKLMNPQRSTVWY";
+  let seed = 24680;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let t = 0; t < 200; t++) {
+    const la = 1 + Math.floor(rnd() * 30), lb = 1 + Math.floor(rnd() * 30);
+    let a = "", b = "";
+    for (let k = 0; k < la; k++) a += AAs[Math.floor(rnd() * 20)];
+    for (let k = 0; k < lb; k++) b += AAs[Math.floor(rnd() * 20)];
+    const r = seq.nwAlign(a, b);
+    if (r.a.length === r.b.length) terminated++;
+  }
+  check("200 random pairs of differing length all terminate", terminated === 200,
+        `(${terminated}/200)`);
+}
+
 console.log("\nProgressive MSA");
 const fam = [
   "MKWVTFISLLLLFSSAYSRGVFRRDTHKSEIAHRFKDLGE",

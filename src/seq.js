@@ -121,19 +121,33 @@
         Tb[i * (n + 1) + j] = dir;
       }
     }
-    // Traceback — return aligned strings
-    let i = m, j = n, ai = "", bj = "";
+    // Traceback — return aligned strings.
+    //
+    // Two things matter here:
+    //   - The traceback must terminate. When j reaches 0 with i still > 0 the
+    //     only legal move is "up" (consume a[i-1] against a gap), but the
+    //     traceback matrix is never written for the j=0 column, so dir reads
+    //     back as 0 and the old code fell into the "left" branch with
+    //     b[j-1] === undefined. That decremented j past zero forever and the
+    //     alignment string grew until V8 threw "Invalid string length". It
+    //     only triggers when the two sequences differ a lot in length, e.g.
+    //     aligning a 1200-residue UniProt sequence to a 300-residue construct.
+    //   - The aligned strings are built with push + join rather than repeated
+    //     prepending, which is O(n) instead of O(n^2).
+    let i = m, j = n;
+    const ai = [], bj = [];
     while (i > 0 || j > 0) {
       const dir = Tb[i * (n + 1) + j];
       if (i > 0 && j > 0 && dir === 0) {
-        ai = a[i - 1] + ai; bj = b[j - 1] + bj; i--; j--;
-      } else if (i > 0 && dir === 1) {
-        ai = a[i - 1] + ai; bj = "-" + bj; i--;
+        ai.push(a[i - 1]); bj.push(b[j - 1]); i--; j--;
+      } else if (i > 0 && (dir === 1 || j === 0)) {
+        ai.push(a[i - 1]); bj.push("-"); i--;
       } else {
-        ai = "-" + ai; bj = b[j - 1] + bj; j--;
+        ai.push("-"); bj.push(b[j - 1]); j--;
       }
     }
-    return { a: ai, b: bj };
+    ai.reverse(); bj.reverse();
+    return { a: ai.join(""), b: bj.join("") };
   }
 
   function progressiveMsa(seqs) {

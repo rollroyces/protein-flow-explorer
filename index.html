@@ -259,6 +259,7 @@
                 <option value="byDomain">By domain</option>
                 <option value="pLDDT">pLDDT (AlphaFold)</option>
                 <option value="conservation">Conservation</option>
+                <option value="variant">Variant significance</option>
                 <option value="uniform">Uniform</option>
               </select>
             </label>
@@ -360,11 +361,12 @@
         </div>
 
         <div class="control-section">
-          <h3>Cancer Variants (ClinVar / COSMIC)</h3>
+          <h3>Cancer Variants (ClinVar)</h3>
           <p class="muted small">
             For human proteins, fetches known disease-associated variants from
-            NCBI ClinVar and renders them as small spheres on the structure.
-            Colour reflects clinical significance.
+            NCBI ClinVar, maps them onto this structure, and renders them as
+            small spheres. Colour reflects clinical significance; the table
+            lists the population allele frequency from gnomAD.
           </p>
           <div class="highlight-actions">
             <button class="btn btn-secondary" id="btn-fetch-variants">🧬 Fetch variants</button>
@@ -374,7 +376,10 @@
           <div class="variant-legend" id="variant-legend">
             <span><span class="dot dot-path"></span>Pathogenic</span>
             <span><span class="dot dot-likpath"></span>Likely path.</span>
+            <span><span class="dot dot-drugresp"></span>Drug response</span>
+            <span><span class="dot dot-risk"></span>Risk factor</span>
             <span><span class="dot dot-vus"></span>VUS</span>
+            <span><span class="dot dot-conflict"></span>Conflicting</span>
             <span><span class="dot dot-likben"></span>Likely ben.</span>
             <span><span class="dot dot-ben"></span>Benign</span>
           </div>
@@ -624,6 +629,7 @@
   <script src="src/geometry.js"></script>
   <script src="src/pockets.js"></script>
   <script src="src/colors.js"></script>
+  <script src="src/variants.js"></script>
 
   <!-- App code -->
   <script src="app.js"></script>
