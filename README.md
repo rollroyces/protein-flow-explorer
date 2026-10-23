@@ -94,7 +94,10 @@ without the numbers is not evidence.
 - **Structure comparison** — superimpose on Cα, colour by per-residue RMSD
 - **Conservation (MSA)** — ~10 UniProt homologs aligned in-browser
 - **pLDDT colouring** — AlphaFold confidence from the B-factor column
-- **ClinVar variants** — cancer-associated variants by clinical significance
+- **Variant map** — ClinVar variants placed on the structure: canonical UniProt
+  positions mapped through the construct's own sequence, wild-type checked
+  against the residue, coloured by clinical significance (pathogenic, drug
+  response, VUS…), with the population allele frequency from gnomAD
 - **Pocket detection** — Fpocket-style concavity scan, validated against ground truth
 - **Ligand contacts** — H-bonds (3.5 Å), salt bridges (4.0 Å), π (5.5 Å), hydrophobic
 - **Ligand properties** — MW, HBD/HBA, TPSA, cLogP, Lipinski Ro5, Veber
@@ -121,14 +124,15 @@ npm run check                 # syntax-check every JS file
 
 No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
 
-The scientific core lives in `src/` as four dependency-free modules —
+The scientific core lives in `src/` as five dependency-free modules —
 `seq.js` (sequence parsing, alignment, MSA, conservation), `geometry.js`
 (distance/angle/dihedral/RMSD), `pockets.js` (spatial hash, density gates,
-ray casting) and `colors.js` (the colour ramps behind every scheme in the
-colour dropdown). They load as plain scripts and publish themselves on the
-`PFE` namespace, so they can be `require()`d and unit-tested with no DOM stub
-at all. See [AUDIT.md](AUDIT.md) for the architecture review that motivated the
-split.
+ray casting), `colors.js` (the colour ramps behind every scheme in the
+colour dropdown) and `variants.js` (ClinVar record parsing, significance
+classification, the UniProt→PDB residue map). They load as plain scripts and
+publish themselves on the `PFE` namespace, so they can be `require()`d and
+unit-tested with no DOM stub at all. See [AUDIT.md](AUDIT.md) for the
+architecture review that motivated the split.
 
 ## Notes on method
 
