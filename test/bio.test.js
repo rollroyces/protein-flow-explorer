@@ -51,6 +51,13 @@ global.$3Dmol = {
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8"),
   { filename: "proteins.js" });
 
+// The extracted pure modules publish themselves on the PFE namespace and must
+// be loaded before app.js, which destructures them.
+for (const m of ["seq", "geometry", "pockets"]) {
+  vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", `${m}.js`), "utf8"),
+    { filename: `src/${m}.js` });
+}
+
 const src = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
 const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration,\n" +

@@ -23,6 +23,9 @@ global.fetch=async(url)=>{calls.push(url);return behaviour(url);};
 
 const ROOT=require("path").join(__dirname,"..");
 vm.runInThisContext(fs.readFileSync(ROOT+"/data/proteins.js","utf8"),{filename:"proteins.js"});
+// Extracted pure modules must load before app.js (it destructures them).
+for(const m of ["seq","geometry","pockets"])
+  vm.runInThisContext(fs.readFileSync(ROOT+"/src/"+m+".js","utf8"),{filename:"src/"+m+".js"});
 let src=fs.readFileSync(ROOT+"/app.js","utf8");
 src=src.replace(/\n\}\)\(\);\s*$/,
  "\n  global.__T__={net,netGeneration,newNetworkGeneration,isAbort};\n})();");

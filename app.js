@@ -18,6 +18,17 @@
 (function () {
   "use strict";
 
+  // ----- Extracted pure modules (see src/) -----
+  // These hold the app's scientific core: sequence handling, molecular
+  // geometry and pocket-grid geometry. They are pure functions with no DOM,
+  // network or viewer dependency, so they can be unit-tested directly.
+  // Destructuring keeps every existing call site unchanged.
+  const { parseSequenceFromPDB, parseFastaSequences, nwAlign, progressiveMsa,
+          conservationScores, buildResidueIndex } = PFE.seq;
+  const { midPoint, cross, dot, computeDistance, computeAngle, computeDihedral,
+          computePerResidueRmsd } = PFE.geometry;
+  const { buildAtomHash, countAtomsNear, rayHits, enclosureFraction } = PFE.pockets;
+
   // ====== GLOBAL STATE ======
   const state = {
     viewer: null,
@@ -348,17 +359,6 @@
     const res = await net(url, opts, gen);
     return res.text();
   }
-
-  // ====== THREE-LETTER → ONE-LETTER ======
-  const AA3TO1 = {
-    ALA: "A", ARG: "R", ASN: "N", ASP: "D", CYS: "C",
-    GLN: "Q", GLU: "E", GLY: "G", HIS: "H", ILE: "I",
-    LEU: "L", LYS: "K", MET: "M", PHE: "F", PRO: "P",
-    SER: "S", THR: "T", TRP: "W", TYR: "Y", VAL: "V",
-    MSE: "M", SEC: "U", PYR: "U", // rare / non-standard
-  };
-  const AA1TO3 = {};
-  for (const k in AA3TO1) AA1TO3[AA3TO1[k]] = k;
 
   // ====== URL STATE ENCODE / DECODE ======
   function encodeState() {
@@ -1126,60 +1126,6 @@
     renderSequencePanel();
   }
 
-  function parseSequenceFromPDB(text, format) {
-    // Build per-chain residue list from ATOM records + SS from HELIX/SHEET.
-    const chainsMap = {}; // chain -> [residues]
-    const ssByResi = {}; // chain -> resi -> 'H' | 'E' | ''
-
-    const lines = text.split(/\r?\n/);
-    const seen = {}; // key chain+resi+atom -> true (dedupe altloc)
-    for (const line of lines) {
-      if (!line.startsWith("ATOM") && !line.startsWith("HETATM")) continue;
-      const chain = line.substring(21, 22).trim() || "A";
-      // For CA-only sequence display, keep only CA atoms
-      const atomName = line.substring(12, 16).trim();
-      if (atomName !== "CA" && atomName !== "P" && format === "pdb") continue;
-      const resi = parseInt(line.substring(22, 26).trim(), 10);
-      const resn = line.substring(17, 20).trim();
-      const ins = line.substring(26, 27).trim();
-      if (!resi) continue;
-      const key = chain + ":" + resi + ":" + ins;
-      if (seen[key]) continue;
-      seen[key] = true;
-      if (!chainsMap[chain]) chainsMap[chain] = [];
-      chainsMap[chain].push({ resi, resn, insCode: ins });
-    }
-    // SS
-    for (const line of lines) {
-      if (line.startsWith("HELIX")) {
-        const chain = line.substring(19, 20).trim() || "A";
-        const start = parseInt(line.substring(21, 25).trim(), 10);
-        const end = parseInt(line.substring(33, 37).trim(), 10);
-        if (!ssByResi[chain]) ssByResi[chain] = {};
-        for (let i = start; i <= end; i++) ssByResi[chain][i] = "H";
-      } else if (line.startsWith("SHEET")) {
-        const chain = line.substring(21, 22).trim() || "A";
-        const start = parseInt(line.substring(22, 26).trim(), 10);
-        const end = parseInt(line.substring(33, 37).trim(), 10);
-        if (!ssByResi[chain]) ssByResi[chain] = {};
-        for (let i = start; i <= end; i++) ssByResi[chain][i] = "E";
-      }
-    }
-    // Build ordered list
-    const chainIds = Object.keys(chainsMap).sort();
-    return {
-      chains: chainIds.map((c) => ({
-        id: c,
-        residues: chainsMap[c].map((r) => ({
-          resi: r.resi,
-          resn: r.resn,
-          one: AA3TO1[r.resn] || "X",
-          ss: ssByResi[c]?.[r.resi] || "",
-        })),
-      })),
-    };
-  }
-
   function renderSequencePanel() {
     if (!state.sequence) {
       dom.sequenceChains.innerHTML = "";
@@ -1406,52 +1352,6 @@
     updateMeasurementsUI();
   }
 
-  function midPoint(a, b) {
-    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 };
-  }
-  function computeDistance(a, b) {
-    return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2);
-  }
-  function computeAngle(a, b, c) {
-    // angle at b between ba and bc vectors
-    const v1 = { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
-    const v2 = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
-    const dot = v1.x * v2.x + v1.y * v2.y + v1.z * v2.z;
-    const m1 = Math.sqrt(v1.x ** 2 + v1.y ** 2 + v1.z ** 2);
-    const m2 = Math.sqrt(v2.x ** 2 + v2.y ** 2 + v2.z ** 2);
-    const cos = Math.max(-1, Math.min(1, dot / (m1 * m2)));
-    return Math.acos(cos) * 180 / Math.PI;
-  }
-  function computeDihedral(a, b, c, d) {
-    // 4-atom dihedral using vectors b1=b-a, b2=c-b, b3=d-c
-    const b1 = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
-    const b2 = { x: c.x - b.x, y: c.y - b.y, z: c.z - b.z };
-    const b3 = { x: d.x - c.x, y: d.y - c.y, z: d.z - c.z };
-    // n1 = b1 × b2 ; n2 = b2 × b3
-    const n1 = cross(b1, b2);
-    const n2 = cross(b2, b3);
-    const m1 = Math.sqrt(dot(n1, n1));
-    const m2 = Math.sqrt(dot(n2, n2));
-    const b2n = Math.sqrt(dot(b2, b2));
-    // m = b2 / |b2|
-    const m = { x: b2.x / b2n, y: b2.y / b2n, z: b2.z / b2n };
-    // x = n1 / |n1|
-    const x = { x: n1.x / m1, y: n1.y / m1, z: n1.z / m1 };
-    // y = m × x
-    const y = cross(m, x);
-    // angle = atan2( n2·y , n2·x )
-    const ang = Math.atan2(dot(n2, y), dot(n2, x));
-    return ang * 180 / Math.PI;
-  }
-  function cross(a, b) {
-    return {
-      x: a.y * b.z - a.z * b.y,
-      y: a.z * b.x - a.x * b.z,
-      z: a.x * b.y - a.y * b.x,
-    };
-  }
-  function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
-
   // ====== COMPARISON + RMSD ======
   dom.btnEnableCompare.addEventListener("click", () => {
     dom.compareControls.hidden = !dom.compareControls.hidden;
@@ -1573,25 +1473,6 @@
     }
   }
 
-  function computePerResidueRmsd(modelA, modelB) {
-    const aAtoms = modelA.selectedAtoms({ atom: "CA" });
-    const bAtoms = modelB.selectedAtoms({ atom: "CA" });
-    // Build lookup for B atoms by (chain, resi)
-    const bMap = new Map();
-    for (const a of bAtoms) {
-      bMap.set(`${a.chain}:${a.resi}`, a);
-    }
-    const result = [];
-    for (const a of aAtoms) {
-      const b = bMap.get(`${a.chain}:${a.resi}`);
-      if (!b) continue;
-      const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
-      const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      result.push({ chain: a.chain, resi: a.resi, value: d });
-    }
-    return result;
-  }
-
   function applyRmsdColors() {
     if (!state.rmsdPerResidue) return;
     // Heatmap: green (0) -> yellow (3Å) -> red (10Å+)
@@ -1692,91 +1573,12 @@
   //   5. Compute per-column conservation (fraction of identical residues at each position).
   //   6. Map back to PDB residue numbers via SIFTS and color the structure.
   // -------- Simple Needleman-Wunsch with BLOSUM62-like scoring --------
-  const NW_MATCH = 2;
-  const NW_MISMATCH = -1;
-  const NW_GAP = -2;
-  function nwAlign(a, b) {
-    const m = a.length, n = b.length;
-    // Score matrix
-    const F = new Int16Array((m + 1) * (n + 1));
-    // Traceback matrix: 0=diag, 1=up, 2=left
-    const Tb = new Uint8Array((m + 1) * (n + 1));
-    for (let i = 0; i <= m; i++) F[i * (n + 1)] = i * NW_GAP;
-    for (let j = 0; j <= n; j++) F[j] = j * NW_GAP;
-    for (let i = 1; i <= m; i++) {
-      for (let j = 1; j <= n; j++) {
-        const s = a[i - 1] === b[j - 1] ? NW_MATCH : NW_MISMATCH;
-        const diag = F[(i - 1) * (n + 1) + (j - 1)] + s;
-        const up = F[(i - 1) * (n + 1) + j] + NW_GAP;
-        const left = F[i * (n + 1) + (j - 1)] + NW_GAP;
-        let best = diag, dir = 0;
-        if (up > best) { best = up; dir = 1; }
-        if (left > best) { best = left; dir = 2; }
-        F[i * (n + 1) + j] = best;
-        Tb[i * (n + 1) + j] = dir;
-      }
-    }
-    // Traceback — return aligned strings
-    let i = m, j = n, ai = "", bj = "";
-    while (i > 0 || j > 0) {
-      const dir = Tb[i * (n + 1) + j];
-      if (i > 0 && j > 0 && dir === 0) {
-        ai = a[i - 1] + ai; bj = b[j - 1] + bj; i--; j--;
-      } else if (i > 0 && dir === 1) {
-        ai = a[i - 1] + ai; bj = "-" + bj; i--;
-      } else {
-        ai = "-" + ai; bj = b[j - 1] + bj; j--;
-      }
-    }
-    return { a: ai, b: bj };
-  }
 
   // Progressive MSA: align the first sequence to each subsequent one using the running consensus.
   // Simpler & faster than tree-based MUSCLE; good enough for a handful of sequences.
-  function progressiveMsa(seqs) {
-    if (seqs.length === 0) return [];
-    let consensus = seqs[0];
-    let aligned = [consensus.split("")];
-    for (let i = 1; i < seqs.length; i++) {
-      const result = nwAlign(consensus, seqs[i]);
-      // Re-align previous sequences to the new consensus to keep all the same length
-      const newAligned = aligned.map((row) => {
-        const s = row.join("");
-        const r = nwAlign(result.a, s);
-        return r.b.split("");
-      });
-      newAligned.push(result.b.split(""));
-      consensus = result.a;
-      aligned = newAligned;
-    }
-    // Pad all rows to consensus length
-    const len = consensus.length;
-    for (const row of aligned) {
-      while (row.length < len) row.push("-");
-    }
-    return { consensus, aligned };
-  }
 
   // Conservation score per column = fraction of sequences with a non-gap residue matching
   // the consensus. Returns array of values 0..1 aligned to the consensus.
-  function conservationScores(msa) {
-    const cons = msa.consensus;
-    const n = cons.length;
-    const out = new Array(n).fill(1);
-    for (let j = 0; j < n; j++) {
-      const ref = cons[j];
-      if (ref === "-") { out[j] = 0; continue; }
-      let matches = 0, total = 0;
-      for (const row of msa.aligned) {
-        const ch = row[j];
-        if (ch === "-") continue;
-        total++;
-        if (ch === ref) matches++;
-      }
-      out[j] = total > 0 ? matches / total : 0;
-    }
-    return out;
-  }
 
   async function fetchRcsbUniprotMapping(pdbId) {
     // RCSB data API: fetch the UniProt accession(s) associated with a PDB entity
@@ -1806,33 +1608,6 @@
   }
 
   // Build a PDB-resi → alignment-index map from the PDB ATOM records
-  function buildResidueIndex(pdbText) {
-    const map = new Map(); // "chain:resi" -> {indexInSequence, resn}
-    let seqIdx = -1;
-    const seen = new Set();
-    const lines = pdbText.split(/\r?\n/);
-    for (const line of lines) {
-      if (!line.startsWith("ATOM")) continue;
-      const atomName = line.substring(12, 16).trim();
-      if (atomName !== "CA") continue;
-      const chain = line.substring(21, 22).trim() || "A";
-      const resi = parseInt(line.substring(22, 26).trim(), 10);
-      const resn = line.substring(17, 20).trim();
-      const key = chain + ":" + resi;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      seqIdx++;
-      map.set(key, { seqIdx, resn });
-    }
-    return { map, sequence: (() => {
-      const seq = [];
-      for (const [, v] of map) seq.push(v.seqIdx);  // not used
-      // Reconstruct 1-letter sequence in seqIdx order
-      const arr = new Array(seqIdx + 1).fill("X");
-      for (const [k, v] of map) arr[v.seqIdx] = (AA3TO1[v.resn] || "X");
-      return arr.join("");
-    })() };
-  }
 
   async function loadConservation() {
     if (state.conservationJob) return state.conservationJob;
@@ -1920,21 +1695,6 @@
   });
 
   // Minimal FASTA parser
-  function parseFastaSequences(text) {
-    const out = [];
-    const lines = text.split(/\r?\n/);
-    let cur = "";
-    for (const line of lines) {
-      if (line.startsWith(">")) {
-        if (cur) out.push(cur);
-        cur = "";
-      } else {
-        cur += line.trim();
-      }
-    }
-    if (cur) out.push(cur);
-    return out;
-  }
 
   // ----- ClinVar variants via NCBI E-utilities -----
   // ESearch finds ClinVar records mentioning the gene name, then ESummary fetches per-record details.
@@ -2057,89 +1817,12 @@
   const POCKET_GLOBAL_R = 10.0;  // overall enclosure
   const POCKET_MIN_WALL = 18;
   const POCKET_MIN_GLOBAL = 45;
-  const POCKET_RAY_R = 9.0;
-  const POCKET_RAY_N = 32;
   const POCKET_MIN_ENCLOSURE = 0.80;
   const POCKET_CLUSTER_R = 3.0;
-  const POCKET_CELL = 10.0;      // spatial-hash cell for the density gates
 
   // Fibonacci sphere unit vectors, computed once.
-  const POCKET_DIRS = (function () {
-    const out = [];
-    const ga = Math.PI * (3 - Math.sqrt(5));
-    for (let i = 0; i < POCKET_RAY_N; i++) {
-      const y = 1 - (i / (POCKET_RAY_N - 1)) * 2;
-      const r = Math.sqrt(Math.max(0, 1 - y * y));
-      const th = ga * i;
-      out.push([Math.cos(th) * r, y, Math.sin(th) * r]);
-    }
-    return out;
-  })();
-
-  function buildAtomHash(atoms) {
-    const map = new Map();
-    for (const a of atoms) {
-      const k = `${Math.floor(a.x / POCKET_CELL)}|${Math.floor(a.y / POCKET_CELL)}|${Math.floor(a.z / POCKET_CELL)}`;
-      let arr = map.get(k);
-      if (!arr) { arr = []; map.set(k, arr); }
-      arr.push(a);
-    }
-    return map;
-  }
-
-  function countAtomsNear(hash, x, y, z, radius) {
-    const cx = Math.floor(x / POCKET_CELL), cy = Math.floor(y / POCKET_CELL), cz = Math.floor(z / POCKET_CELL);
-    const span = Math.ceil(radius / POCKET_CELL);
-    const r2 = radius * radius;
-    let c = 0;
-    for (let dx = -span; dx <= span; dx++) {
-      for (let dy = -span; dy <= span; dy++) {
-        for (let dz = -span; dz <= span; dz++) {
-          const arr = hash.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
-          if (!arr) continue;
-          for (let i = 0; i < arr.length; i++) {
-            const a = arr[i];
-            const ax = a.x - x, ay = a.y - y, az = a.z - z;
-            if (ax * ax + ay * ay + az * az < r2) c++;
-          }
-        }
-      }
-    }
-    return c;
-  }
 
   // True if a ray from (x,y,z) along unit (dx,dy,dz) hits protein within radius.
-  function rayHits(hash, x, y, z, dx, dy, dz, radius) {
-    const steps = Math.ceil(radius / 1.0);
-    const hit2 = 2.6 * 2.6;
-    for (let s = 1; s <= steps; s++) {
-      const t = s * 1.0;
-      const px = x + dx * t, py = y + dy * t, pz = z + dz * t;
-      const cx = Math.floor(px / POCKET_CELL), cy = Math.floor(py / POCKET_CELL), cz = Math.floor(pz / POCKET_CELL);
-      for (let ax2 = cx - 1; ax2 <= cx + 1; ax2++) {
-        for (let ay2 = cy - 1; ay2 <= cy + 1; ay2++) {
-          for (let az2 = cz - 1; az2 <= cz + 1; az2++) {
-            const arr = hash.get(`${ax2}|${ay2}|${az2}`);
-            if (!arr) continue;
-            for (let i = 0; i < arr.length; i++) {
-              const a = arr[i];
-              const qx = a.x - px, qy = a.y - py, qz = a.z - pz;
-              if (qx * qx + qy * qy + qz * qz < hit2) return true;
-            }
-          }
-        }
-      }
-    }
-    return false;
-  }
-
-  function enclosureFraction(hash, x, y, z) {
-    let hits = 0;
-    for (const d of POCKET_DIRS) {
-      if (rayHits(hash, x, y, z, d[0], d[1], d[2], POCKET_RAY_R)) hits++;
-    }
-    return hits / POCKET_RAY_N;
-  }
 
   async function detectPockets() {
     if (!state.models.length) { showCustomError("No structure loaded."); return; }

@@ -618,6 +618,12 @@
   <!-- App data -->
   <script src="data/proteins.js"></script>
 
+  <!-- Extracted pure analysis modules. These publish themselves on the PFE
+       namespace and must load before app.js, which destructures them. -->
+  <script src="src/seq.js"></script>
+  <script src="src/geometry.js"></script>
+  <script src="src/pockets.js"></script>
+
   <!-- App code -->
   <script src="app.js"></script>
 </body>
