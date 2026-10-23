@@ -4,6 +4,9 @@ An interactive tool for visualising, measuring and explaining 3D protein structu
 built for teaching, extended for research.
 
 > **Live:** https://rollroyces.github.io/protein-flow-explorer/
+>
+> **Audit:** [AUDIT.md](AUDIT.md) — structured code and architecture review
+> (performance, architecture, robustness, DevOps) with a prioritised top 3.
 
 ## How to present a structure bioinformatically
 
@@ -112,10 +115,19 @@ Load anything else by PDB ID, gene symbol, UniProt accession, or by dropping a
 
 ```bash
 python3 -m http.server 8765   # then open http://localhost:8765
-node test/bio.test.js         # 48 assertions over the analysis routines
+npm test                      # 130 assertions across 3 suites
+npm run check                 # syntax-check every JS file
 ```
 
 No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
+
+The scientific core lives in `src/` as three dependency-free modules —
+`seq.js` (sequence parsing, alignment, MSA, conservation), `geometry.js`
+(distance/angle/dihedral/RMSD) and `pockets.js` (spatial hash, density gates,
+ray casting). They load as plain scripts and publish themselves on the `PFE`
+namespace, so they can be `require()`d and unit-tested with no DOM stub at
+all. See [AUDIT.md](AUDIT.md) for the architecture review that motivated the
+split.
 
 ## Notes on method
 
