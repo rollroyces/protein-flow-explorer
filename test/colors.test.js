@@ -228,5 +228,37 @@ check("3Dmol schemes are passed via `colorscheme`", schemeNames.length === 2,
 check("both schemes are real 3Dmol schemes",
       schemeNames.every((s) => ["Jmol", "amino", "ssJmol", "chain", "rasmol", "default"].includes(s)));
 
+// The same contract, applied to EVERY colour literal in the app rather than
+// just resolveColor(). A scheme name anywhere in a `color:` field renders
+// that representation black.
+console.log("\nEvery colour literal in the app is a real colour");
+const HTML_COLOURS = new Set([
+  "yellow", "magenta", "cyan", "white", "black", "red", "green", "blue",
+  "grey", "gray", "orange", "purple", "pink", "silver", "gold", "lime",
+  "maroon", "navy", "teal", "olive", "aqua", "fuchsia", "brown", "cyan",
+]);
+const SCHEME_NAMES = new Set([
+  "chain", "ss", "spectrum", "byElement", "residue", "hydrophobicity",
+  "bFactor", "byDomain", "pLDDT", "conservation", "uniform",
+  "ssJmol", "ssPyMol", "Jmol", "amino", "rasmol", "default", "chainHetatm",
+]);
+const allLiterals = [...appSrc.matchAll(/\bcolor:\s*"([^"]+)"/g)].map((m) => m[1]);
+const schemeAsLiteral = allLiterals.filter((c) => SCHEME_NAMES.has(c));
+check("no scheme name appears in any colour field", schemeAsLiteral.length === 0,
+      schemeAsLiteral.length ? `(${schemeAsLiteral.join(", ")})` : "");
+const notAColour = allLiterals.filter((c) => !c.startsWith("#") && !HTML_COLOURS.has(c.toLowerCase()));
+check("every string colour is an html colour or a hex literal", notAColour.length === 0,
+      notAColour.length ? `(${notAColour.join(", ")})` : "");
+check("the app does use colour fields", allLiterals.length > 0, `(${allLiterals.length})`);
+
+// The colour-scheme names the app advertises must all be real 3Dmol schemes
+// or app-owned schemes, never typos that would silently fall through.
+const KNOWN = new Set(["chain", "ss", "spectrum", "byElement", "residue",
+  "hydrophobicity", "bFactor", "byDomain", "pLDDT", "conservation", "uniform"]);
+const advertised = [...resolveBlock.matchAll(/case "([A-Za-z]+)":/g)].map((m) => m[1]);
+check("every colour case is a known scheme",
+      advertised.length === 11 && advertised.every((a) => KNOWN.has(a)),
+      `(${advertised.join(", ")})`);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

@@ -1170,7 +1170,9 @@
     state.viewer.render();
   });
   dom.btnHighlightAll.addEventListener("click", () => {
-    state.viewer.setStyle({}, { stick: { radius: 0.12, color: "byElement", opacity: 0.6 } });
+    // `colorscheme`, not `color`: 3Dmol reads `color` as a literal colour
+    // value, so a scheme name there renders the structure black.
+    state.viewer.setStyle({}, { stick: { radius: 0.12, colorscheme: "Jmol", opacity: 0.6 } });
     state.viewer.render();
   });
   dom.btnClearHighlights.addEventListener("click", () => {
