@@ -53,16 +53,20 @@ vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8")
 
 const src = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
 const probe = src.replace(/\n\}\)\(\);\s*$/,
-  "\n  global.__PROBE__ = { plddtToColor, midPoint, computeDistance, computeAngle,\n" +
+  "\n  global.__PROBE__ = { NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration,\n" +
+  "    isAbort, currentNetGeneration: () => netGeneration, plddtToColor,\n" +
+  "    midPoint, computeDistance, computeAngle,\n" +
   "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
   "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
   "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +
-  "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF,\n  POCKET_MIN_ENCLOSURE, POCKET_MIN_WALL, POCKET_MIN_GLOBAL, POCKET_CLUSTER_R };\n})();");
+  "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF,\n" +
+  "    POCKET_MIN_ENCLOSURE, POCKET_MIN_WALL, POCKET_MIN_GLOBAL, POCKET_CLUSTER_R };\n})();");
 vm.runInThisContext(probe, { filename: "app.js" });
 const P = global.__PROBE__;
 const {
   isPlanarAromatic, isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,
   HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF,
+  NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration, isAbort, currentNetGeneration,
 } = P;
 
 let pass = 0, fail = 0;
@@ -181,6 +185,22 @@ const offDrugMean = 0.60;
 const onDrugPointsOverThreshold = 46;   // of 136 selected points
 check("threshold above off-drug mean (specificity)", POCKET_MIN_ENCLOSURE > offDrugMean);
 check("drug-site points survive threshold (recall)", onDrugPointsOverThreshold > 0);
+
+
+console.log("\nNetwork layer invariants");
+// Every outbound request must have a bounded deadline. This was the highest
+// impact defect found in the audit: 10 of 14 call sites used bare fetch().
+check("timeout is bounded",   NET_TIMEOUT_MS > 0 && NET_TIMEOUT_MS <= 60000, `(${NET_TIMEOUT_MS} ms)`);
+check("retries are bounded", NET_RETRIES <= 3, `(${NET_RETRIES})`);
+
+// Generation guard: switching protein must invalidate in-flight work.
+const g0 = newNetworkGeneration();
+const g1 = newNetworkGeneration();
+check("generation advances on switch", g1 > g0, `(${g0} -> ${g1})`);
+check("generation is readable", currentNetGeneration() === g1);
+check("superseded requests are detectable", isAbort({ __stale: true }) === true);
+check("AbortError is detectable", isAbort({ name: "AbortError" }) === true);
+check("ordinary errors are not aborts", isAbort(new Error("HTTP 404")) === false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

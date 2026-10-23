@@ -1,0 +1,13 @@
+{
+  "name": "protein-flow-explorer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Interactive 3D protein structure visualiser for teaching and research",
+  "license": "MIT",
+  "scripts": {
+    "serve": "python3 -m http.server 8765",
+    "test": "node test/bio.test.js && node test/net.test.js",
+    "check": "node --check app.js && node --check data/proteins.js"
+  },
+  "devDependencies": {}
+}

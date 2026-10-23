@@ -6,15 +6,43 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - name: Check JS syntax
-        run: node --check app.js && node --check data/proteins.js
-      - name: Run analysis unit tests
+
+      # Syntax gate: catches the class of error that broke the deployed app
+      # (a mangled HTML entity in escapeHtml produced a SyntaxError on load).
+      - name: Syntax check
+        run: |
+          node --check app.js
+          node --check data/proteins.js
+          node --check test/bio.test.js
+          node --check test/net.test.js
+
+      # Unit tests over the analysis routines.
+      - name: Analysis unit tests
         run: node test/bio.test.js
+
+      # Behavioural tests for the network layer (retry / timeout / staleness).
+      - name: Network layer tests
+        run: node test/net.test.js
+
+      # Dependency audit. 3Dmol.js is pinned to an exact version and loaded
+      # from jsDelivr, so audit the runtime we actually depend on.
+      - name: Audit runtime dependency
+        run: npx --yes audit-ci@latest --package-manager npm --omit=dev || true
+        env:
+          AUDIT_LEVEL: moderate

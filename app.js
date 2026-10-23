@@ -273,16 +273,80 @@
     };
   }
 
-  // fetch with a timeout, so a stalled network never leaves the UI spinning forever.
-  const FETCH_TIMEOUT_MS = 15000;
-  async function fetchWithTimeout(url, opts) {
-    const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, FETCH_TIMEOUT_MS);
-    try {
-      return await fetch(url, ctrl ? { ...(opts || {}), signal: ctrl.signal } : opts);
-    } finally {
-      clearTimeout(timer);
+  // ====== NETWORK LAYER ======
+  // Every outbound request in the app goes through net(). This gives one place
+  // to enforce a deadline, retry transient failures with backoff, and cancel
+  // work that the user has moved on from.
+  //
+  // Before this existed, 10 of 14 call sites used bare fetch(): a stalled RCSB
+  // or UniProt response left the UI spinning indefinitely with no feedback and
+  // no way out. Worse, switching proteins mid-load let a slow earlier response
+  // land after a faster later one and overwrite the current view.
+  const NET_TIMEOUT_MS = 20000;
+  const NET_RETRIES = 1;          // one retry covers the common transient case
+  const NET_BACKOFF_MS = 600;
+
+  // Bumped on every protein switch so late responses from a previous load are
+  // discarded instead of clobbering the new one.
+  let netGeneration = 0;
+  function newNetworkGeneration() { netGeneration++; return netGeneration; }
+
+  function isAbort(err) {
+    return err && (err.name === "AbortError" || err.__stale === true);
+  }
+
+  /**
+   * Fetch with a hard deadline and bounded retries.
+   * @param {string} url
+   * @param {object} opts
+   * @param {number} gen  network generation this request belongs to
+   */
+  async function net(url, opts, gen) {
+    opts = opts || {};
+    if (gen !== undefined && gen !== netGeneration) {
+      const stale = new Error("stale request");
+      stale.__stale = true;
+      throw stale;
     }
+    let lastErr;
+    for (let attempt = 0; attempt <= NET_RETRIES; attempt++) {
+      if (gen !== undefined && gen !== netGeneration) {
+        const stale = new Error("stale request");
+        stale.__stale = true;
+        throw stale;
+      }
+      const ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = setTimeout(() => { if (ctrl) ctrl.abort(); }, NET_TIMEOUT_MS);
+      try {
+        const res = await fetch(url, ctrl ? { ...opts, signal: ctrl.signal } : opts);
+        if (res.ok || res.status < 500) return res;   // 4xx is a real answer, not a retry
+        lastErr = new Error(`HTTP ${res.status}`);
+      } catch (err) {
+        if (ctrl && err && err.name === "AbortError") {
+          lastErr = new Error(`timeout after ${NET_TIMEOUT_MS / 1000}s`);
+        } else {
+          lastErr = err;
+        }
+      } finally {
+        clearTimeout(timer);
+      }
+      if (attempt < NET_RETRIES) {
+        await new Promise((r) => setTimeout(r, NET_BACKOFF_MS * (attempt + 1)));
+      }
+    }
+    throw lastErr || new Error("request failed");
+  }
+
+  /** Convenience: net() plus a JSON parse, with the same guarantees. */
+  async function netJson(url, opts, gen) {
+    const res = await net(url, opts, gen);
+    return res.json();
+  }
+
+  /** Convenience: net() plus a text parse. */
+  async function netText(url, opts, gen) {
+    const res = await net(url, opts, gen);
+    return res.text();
   }
 
   // ====== THREE-LETTER → ONE-LETTER ======
@@ -501,7 +565,7 @@
     }
     showLoading(`Fetching PDB ${pdbId}…`);
     try {
-      const response = await fetch(`https://files.rcsb.org/download/${pdbId}.pdb`);
+      const response = await net(`https://files.rcsb.org/download/${pdbId}.pdb`);
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.text();
       if (!data || data.length < 50) throw new Error("Empty or invalid response");
@@ -648,7 +712,7 @@
       } else {
         // Treat as gene name — query UniProt
         const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${encodeURIComponent(query)}+AND+organism_id:9606&format=json&size=1&fields=accession,gene_names,protein_name`;
-        const r = await fetch(url);
+        const r = await net(url);
         if (!r.ok) throw new Error(`UniProt search returned ${r.status}`);
         const j = await r.json();
         const hit = j.results && j.results[0];
@@ -663,7 +727,7 @@
       // Try to find PDB cross-references
       showLoading(`Fetching cross-refs for ${accession}…`);
       const entryUrl = `https://rest.uniprot.org/uniprotkb/${accession}.json`;
-      const er = await fetch(entryUrl);
+      const er = await net(entryUrl);
       if (!er.ok) throw new Error(`UniProt entry fetch returned ${er.status}`);
       const ej = await er.json();
       const pdbRefs = (ej.uniProtKBCrossReferences || [])
@@ -684,7 +748,7 @@
         // Fallback: AlphaFold
         showLoading(`No PDB — fetching AlphaFold model for ${accession}…`);
         const afUrl = `https://alphafold.ebi.ac.uk/files/AF-${accession}-F1-model_v4.pdb`;
-        const afr = await fetch(afUrl);
+        const afr = await net(afUrl);
         if (!afr.ok) {
           hideLoading();
           showCustomError(`No PDB or AlphaFold model for ${accession}.`);
@@ -716,6 +780,11 @@
   async function loadProtein(proteinId) {
     const protein = PROTEINS.find((p) => p.id === proteinId);
     if (!protein) return;
+
+    // Claim a network generation: any request still in flight from a previous
+    // protein will be discarded on arrival instead of overwriting this one.
+    const gen = newNetworkGeneration();
+    state._netGen = gen;
 
     // If switching to a different protein, clear comparison
     if (state.compareProtein && state.compareProtein.id !== proteinId) {
@@ -752,7 +821,7 @@
           data = protein.rawData;
         } else {
           const url = `https://files.rcsb.org/download/${pdbId}.pdb`;
-          const response = await fetch(url);
+          const response = await net(url, undefined, gen);
           if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${pdbId}`);
           data = await response.text();
           if (!data) throw new Error(`Empty response for ${pdbId}`);
@@ -795,8 +864,11 @@
       // Update URL
       updateUrlDebounced();
     } catch (err) {
+      // Superseded by a newer protein load, or the user navigated away: the new
+      // load owns the spinner, so don't stomp on it with a stale error.
+      if (isAbort(err) || gen !== netGeneration) return;
       console.error(err);
-      dom.loadingText.textContent = `Could not load ${protein.name}. Check your connection.`;
+      dom.loadingText.textContent = `Could not load ${protein.name}: ${err.message}`;
     }
   }
 
@@ -1409,7 +1481,7 @@
     }
     showLoading(`Loading structure B (${pdbId})…`);
     try {
-      const r = await fetch(`https://files.rcsb.org/download/${pdbId}.pdb`);
+      const r = await net(`https://files.rcsb.org/download/${pdbId}.pdb`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.text();
       const model = state.viewer.addModel(data, "pdb");
@@ -1711,14 +1783,14 @@
     // Returns: { "rcsb_polymer_entity_container_identifiers.reference_sequence_identifiers": [...] }
     try {
       const url = `https://data.rcsb.org/rest/v1/core/entry/${pdbId.toLowerCase()}`;
-      const r = await fetch(url);
+      const r = await net(url);
       if (!r.ok) return null;
       const j = await r.json();
       const entities = j.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
       // Iterate entities to find a UniProt accession
       for (const eid of entities) {
         try {
-          const er = await fetch(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
+          const er = await net(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
           if (!er.ok) continue;
           const ej = await er.json();
           const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
@@ -1782,7 +1854,7 @@
         dom.conservationStatus.textContent = `Fetching canonical sequence (${acc})…`;
         // UniProt canonical sequence
         const fastaUrl = `https://rest.uniprot.org/uniprotkb/${acc}.fasta`;
-        const fr = await fetch(fastaUrl);
+        const fr = await net(fastaUrl);
         if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
         const fastaText = await fr.text();
         const canonical = parseFastaSequences(fastaText)[0] || "";
@@ -1792,7 +1864,7 @@
         // Homologs via UniProt search: by organism (human) and protein name keywords
         const protName = state.currentProtein.name.split(/[·•:()\-]/)[0].trim();
         const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
-        const sr = await fetch(searchUrl);
+        const sr = await net(searchUrl);
         if (!sr.ok) throw new Error("Homolog search failed");
         const homologFasta = await sr.text();
         const homologs = parseFastaSequences(homologFasta);
@@ -1896,7 +1968,7 @@
 
       // ESearch
       const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=clinvar&term=${encodeURIComponent(geneGuess + "[gene]")}&retmax=200&retmode=json`;
-      const r = await fetch(esearchUrl);
+      const r = await net(esearchUrl);
       if (!r.ok) throw new Error(`ClinVar esearch ${r.status}`);
       const j = await r.json();
       const ids = (j.esearchresult && j.esearchresult.idlist) || [];
@@ -1915,7 +1987,7 @@
       for (const id of batch) {
         try {
           const surl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=clinvar&id=${id}&retmode=json`;
-          const sr = await fetch(surl);
+          const sr = await net(surl);
           if (!sr.ok) continue;
           const sj = await sr.json();
           const r2 = sj.result && sj.result[id];
@@ -2700,6 +2772,7 @@
   async function loadStructureMetadata() {
     const protein = state.currentProtein;
     if (!protein) return;
+    const gen = state._netGen;
     const pdbId = protein.pdbIds[state.currentPdbIndex];
     if (!/^[0-9A-Za-z]{4}$/.test(pdbId)) {
       dom.metaGrid.innerHTML = '<div class="muted small">Metadata only available for deposited PDB entries.</div>';
@@ -2708,7 +2781,7 @@
     dom.metaGrid.innerHTML = '<div class="muted small">Loading metadata…</div>';
     try {
       const id = pdbId.toLowerCase();
-      const entryRes = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/entry/${id}`);
+      const entryRes = await net(`https://data.rcsb.org/rest/v1/core/entry/${id}`, undefined, gen);
       if (!entryRes.ok) throw new Error(`entry ${entryRes.status}`);
       const entry = await entryRes.json();
       const info = entry.rcsb_entry_info || {};
@@ -2731,7 +2804,7 @@
       let uniprot = null;
       for (const eid of polymerIds) {
         try {
-          const er = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/polymer_entity/${id}/${eid}`);
+          const er = await net(`https://data.rcsb.org/rest/v1/core/polymer_entity/${id}/${eid}`, undefined, gen);
           if (!er.ok) continue;
           const ej = await er.json();
           const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
@@ -2755,7 +2828,7 @@
       const ligands = [];
       for (const eid of npIds) {
         try {
-          const r = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${id}/${eid}`);
+          const r = await net(`https://data.rcsb.org/rest/v1/core/nonpolymer_entity/${id}/${eid}`, undefined, gen);
           if (!r.ok) continue;
           const j = await r.json();
           const np = j.pdbx_entity_nonpoly || {};
@@ -2778,6 +2851,8 @@
       renderLigandList();
       refreshPresentationIfReady();
     } catch (err) {
+      // A superseded request is not a failure — the user already moved on.
+      if (isAbort(err) || gen !== netGeneration) return;
       dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable (${escapeHtml(err.message)}). The structure itself is unaffected.</div>`;
       dom.ligandList.innerHTML = '<div class="measurement-table-empty">Metadata unavailable</div>';
     }
@@ -3482,7 +3557,7 @@
       const pdbId = m[1].toUpperCase();
       showLoading(`Fetching ${pdbId} from share link…`);
       try {
-        const r = await fetch(`https://files.rcsb.org/download/${pdbId}.pdb`);
+        const r = await net(`https://files.rcsb.org/download/${pdbId}.pdb`);
         if (!r.ok) throw new Error("HTTP " + r.status);
         const data = await r.text();
         const protein = makeCustomProtein({
