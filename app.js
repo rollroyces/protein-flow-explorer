@@ -216,6 +216,14 @@
     mutationStatus: $("mutation-status"),
 
     // Modal / share
+    // Presentation tab (bioinformatics record view)
+    hierarchy: $("hierarchy"),
+    xrefList: $("xref-list"),
+    annotKey: $("annot-key"),
+    uncertainty: $("uncertainty"),
+    citeBlock: $("cite-block"),
+    btnCopyCite: $("btn-copy-cite"),
+
     btnAbout: $("btn-about"),
     aboutModal: $("about-modal"),
     btnCloseAbout: $("btn-close-about"),
@@ -1020,6 +1028,7 @@
       if (tab !== "tour") stopTour();
       if (tab !== "trajectory") stopTrajectory();
       if (tab !== "tools") setPickMode(false);
+      if (tab === "presentation") refreshPresentationIfReady();
     });
   });
 
@@ -2716,6 +2725,31 @@
 
       state.meta = { pdbId, method, resolution, rfree, rwork, deposited, released, title };
 
+      // Chains and UniProt accession (SIFTS) for the cross-reference panel.
+      const chains = [];
+      const polymerIds = entry.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
+      let uniprot = null;
+      for (const eid of polymerIds) {
+        try {
+          const er = await fetchWithTimeout(`https://data.rcsb.org/rest/v1/core/polymer_entity/${id}/${eid}`);
+          if (!er.ok) continue;
+          const ej = await er.json();
+          const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
+          const desc = (ej.rcsb_polymer_entity_container_identifiers?.entity_poly || {}).pdbx_description;
+          const chainsForEntity = (ej.entity_poly?.pdbx_strand_id || "").split(",").filter(Boolean);
+          chains.push({ id: eid, description: desc || "polymer", chains: chainsForEntity });
+          if (!uniprot) {
+            for (const ref of refs) {
+              if (ref.database_name === "UniProt") { uniprot = ref.database_accession; break; }
+            }
+          }
+        } catch (e) { /* skip entity */ }
+      }
+      state.meta.chains = chains;
+      state.meta.uniprot = uniprot;
+      state.meta.polymerEntities = polymerIds.length;
+      state.meta.nonPolymerEntities = (entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || []).length;
+
       // Ligands: fetch each non-polymer entity
       const npIds = entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || [];
       const ligands = [];
@@ -2742,6 +2776,7 @@
       state.ligands = ligands;
       renderMetadataPanel();
       renderLigandList();
+      refreshPresentationIfReady();
     } catch (err) {
       dom.metaGrid.innerHTML = `<div class="muted small">Metadata unavailable (${escapeHtml(err.message)}). The structure itself is unaffected.</div>`;
       dom.ligandList.innerHTML = '<div class="measurement-table-empty">Metadata unavailable</div>';
@@ -3201,6 +3236,207 @@
     dom.exportStatus.textContent = "Exported CSV.";
   }
   dom.btnExportCsv.addEventListener("click", exportCsv);
+
+  // ====== PRESENTATION: the bioinformatics record view ======
+  // The principle: a deposited structure is a linked record, not a picture.
+  // Present it in the order a bioinformatician consumes it —
+  //   entry -> entities/chains -> ligands -> residues -> atoms
+  // and attach provenance, an explicit annotation key, and honest uncertainty
+  // at each level.
+
+  const ANNOTATIONS = [
+    {
+      id: "chain", name: "By chain", quantity: "polymer entity / chain",
+      grad: "linear-gradient(90deg,#2f7ed8,#ef553b,#00a878,#f2b705,#9b5de5)",
+      use: "Locating a domain or subunit across a complex.",
+    },
+    {
+      id: "ss", name: "Secondary structure", quantity: "helix / strand / coil (HELIX + SHEET records)",
+      grad: "linear-gradient(90deg,#ef5350,#f5c542,#9aa0a6)",
+      use: "Reading fold architecture; finding helices that pack into the core.",
+    },
+    {
+      id: "spectrum", name: "Spectrum (N→C)", quantity: "residue index along the chain",
+      grad: "linear-gradient(90deg,#0053d6,#00b4d8,#f5c542,#cc1f1f)",
+      use: "Following a sequence walk; spotting a domain boundary.",
+    },
+    {
+      id: "bFactor", name: "B-factor", quantity: "atomic displacement (Å²)",
+      grad: "linear-gradient(90deg,#2f7ed8,#00a878,#f5c542,#cc1f1f)",
+      use: "Experimental flexibility in the crystal. High = disordered or mobile.",
+      needs: "crystal",
+    },
+    {
+      id: "pLDDT", name: "pLDDT (AlphaFold)", quantity: "per-residue prediction confidence (0–100)",
+      grad: "linear-gradient(90deg,#ff7d45,#ffdb13,#65cbf3,#0053d6)",
+      use: "Trust in an AlphaFold model. <50 is usually a disordered tail.",
+      needs: "alphafold",
+    },
+    {
+      id: "conservation", name: "Conservation", quantity: "MSA column identity across homologs",
+      grad: "linear-gradient(90deg,#5b8def,#f5c542,#cc1f1f)",
+      use: "Finding functional sites — the core is invariant, the surface is not.",
+      needs: "conservation",
+    },
+    {
+      id: "hydrophobicity", name: "Hydrophobicity", quantity: "Kyte–Doolittle side-chain score",
+      grad: "linear-gradient(90deg,#0053d6,#f5c542,#cc1f1f)",
+      use: "Reading a surface for a ligand-facing hydrophobic face.",
+    },
+  ];
+
+  function renderPresentation() {
+    const m = state.meta;
+    const prot = state.currentProtein;
+
+    // ---- evidence hierarchy ----
+    const model = state.models[state.currentPdbIndex];
+    let atomCount = 0, resCount = 0;
+    const chainSet = new Set();
+    if (model) {
+      const atoms = safeSelect(model, {});
+      atomCount = atoms.length;
+      const resSet = new Set();
+      for (const a of atoms) {
+        if (a.chain) chainSet.add(a.chain);
+        resSet.add(`${a.chain}:${a.resi}`);
+      }
+      resCount = resSet.size;
+    }
+    const levels = [
+      {
+        name: "Entry", value: m ? m.pdbId.toUpperCase() : "—",
+        note: m ? `${m.method}${m.resolution !== "—" ? " @ " + m.resolution : ""}` : "awaiting metadata",
+      },
+      {
+        name: "Polymer entities", value: m ? `${m.polymerEntities ?? "—"}` : "—",
+        note: chainSet.size ? `chains ${Array.from(chainSet).sort().join(", ")}` : "—",
+      },
+      {
+        name: "Ligands / hetero", value: m ? `${m.nonPolymerEntities ?? "—"}` : "—",
+        note: (state.ligands || []).length
+          ? state.ligands.map((l) => l.compId).join(", ")
+          : "none deposited",
+      },
+      { name: "Residues (modelled)", value: resCount || "—", note: "unique chain:resi with coordinates" },
+      { name: "Atoms", value: atomCount || "—", note: "as parsed from the coordinate file" },
+    ];
+    dom.hierarchy.innerHTML = levels.map((l) => `
+      <li>
+        <span class="h-name">${escapeHtml(l.name)}</span>
+        <span class="h-value">${escapeHtml(String(l.value))}</span>
+        <span class="h-note">${escapeHtml(l.note || "")}</span>
+      </li>`).join("");
+
+    // ---- cross-references ----
+    const isAF = prot && /alphafold/i.test(prot.id || "");
+    const up = m && m.uniprot;
+    const xrefs = [
+      { db: "PDB", id: m ? m.pdbId.toUpperCase() : null,
+        url: m ? `https://www.rcsb.org/structure/${m.pdbId.toUpperCase()}` : null },
+      { db: "UniProt", id: up || null,
+        url: up ? `https://www.uniprot.org/uniprotkb/${up}` : null },
+      { db: "AlphaFold", id: isAF && up ? `AF-${up}-F1` : null,
+        url: isAF && up ? `https://alphafold.ebi.ac.uk/entry/${up}` : null },
+      { db: "Method", id: m ? m.method : null, url: null },
+    ];
+    dom.xrefList.innerHTML = xrefs.map((x) => `
+      <div class="xref">
+        <span class="x-db">${escapeHtml(x.db)}</span>
+        <span class="x-id ${x.id ? "" : "none"}">${escapeHtml(x.id || "not resolved")}</span>
+        ${x.url ? `<a class="x-go" href="${escapeHtml(x.url)}" target="_blank" rel="noopener">↗</a>` : "<span></span>"}
+      </div>`).join("");
+
+    // ---- annotation key ----
+    const available = {
+      crystal: !!m && /X-RAY|NMR|EM|ELECTRON|CRYO/.test(m.method || ""),
+      alphafold: !!isAF,
+      conservation: !!state.conservation,
+    };
+    dom.annotKey.innerHTML = ANNOTATIONS.map((a) => {
+      const ok = !a.needs || available[a.needs];
+      return `<div class="annot-row ${ok ? "" : "unavailable"}" data-annot="${escapeHtml(a.id)}">
+        <span class="annot-swatch" style="background:${a.grad}"></span>
+        <span>
+          <span class="a-name">${escapeHtml(a.name)}</span><br>
+          <span class="a-qty">${escapeHtml(a.quantity)}</span><br>
+          <span class="a-use">${escapeHtml(a.use)}</span>
+          ${ok ? "" : '<br><span class="a-use">unavailable for this structure</span>'}
+        </span>
+      </div>`;
+    }).join("");
+    dom.annotKey.querySelectorAll(".annot-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        const id = row.dataset.annot;
+        if (state.currentColor === id) return;
+        dom.ctrlColor.value = id;
+        dom.ctrlColor.dispatchEvent(new Event("change"));
+        state.viewer.render();
+        dom.annotKey.querySelectorAll(".annot-row").forEach((r) => r.classList.remove("active"));
+        row.classList.add("active");
+      });
+    });
+
+    // ---- uncertainty: two independent axes ----
+    const resNum = m && m.resolution !== "—" ? parseFloat(m.resolution) : null;
+    let modelVerdict = "unc-verdict-na", modelTxt = "No refinement statistics available for this entry.";
+    if (resNum !== null) {
+      if (resNum <= 1.8) { modelVerdict = "unc-verdict-good"; modelTxt = "Fine side chains and well-ordered waters. Side-chain rotamers are usually trustworthy."; }
+      else if (resNum <= 2.5) { modelVerdict = "unc-verdict-good"; modelTxt = "Standard for crystallography. Backbone reliable; distal side chains and waters may be unreliable."; }
+      else if (resNum <= 3.5) { modelVerdict = "unc-verdict-warn"; modelTxt = "Coarse. Treat side-chain positions and any ligand pose as hypotheses."; }
+      else { modelVerdict = "unc-verdict-warn"; modelTxt = "Low resolution. Loops and side chains may not be resolved at all."; }
+    }
+    const isCrystal = m && /X-RAY/i.test(m.method || "");
+    const bfactors = [];
+    if (model && isCrystal) {
+      const atoms = safeSelect(model, {});
+      for (const a of atoms) if (typeof a.b === "number") bfactors.push(a.b);
+    }
+    let orderVerdict = "unc-verdict-na", orderTxt = "Not applicable to this entry.";
+    if (isCrystal && bfactors.length) {
+      bfactors.sort((x, y) => x - y);
+      const med = bfactors[Math.floor(bfactors.length / 2)];
+      const p95 = bfactors[Math.floor(bfactors.length * 0.95)];
+      if (p95 > 100) { orderVerdict = "unc-verdict-warn"; orderTxt = `Median B ${med.toFixed(0)} Å², 95th pct ${p95.toFixed(0)} Å². Large regions are mobile or disordered — do not read conformation there.`; }
+      else { orderVerdict = "unc-verdict-good"; orderTxt = `Median B ${med.toFixed(0)} Å², 95th pct ${p95.toFixed(0)} Å². Mostly well ordered; local flexibility still present.`; }
+    } else if (/NMR/i.test((m && m.method) || "")) {
+      orderVerdict = "unc-verdict-na"; orderTxt = "Solution NMR: an ensemble of models, each a sample. Read ensembles and state populations, not one model.";
+    }
+    dom.uncertainty.innerHTML = `
+      <div class="unc">
+        <div class="u-q">Is the model right? — resolution / method</div>
+        <div class="u-a">${escapeHtml(modelTxt)}</div>
+        <span class="u-verdict ${modelVerdict}">${modelVerdict === "unc-verdict-good" ? "USABLE" : modelVerdict === "unc-verdict-warn" ? "USE WITH CAUTION" : "NOT APPLICABLE"}</span>
+      </div>
+      <div class="unc">
+        <div class="u-q">Is the region ordered? — B-factor / pLDDT</div>
+        <div class="u-a">${escapeHtml(orderTxt)}</div>
+        <span class="u-verdict ${orderVerdict}">${orderVerdict === "unc-verdict-good" ? "ORDERED" : orderVerdict === "unc-verdict-warn" ? "PARTLY DISORDERED" : "NOT APPLICABLE"}</span>
+      </div>`;
+
+    // ---- citation ----
+    const year = m && m.released && m.released !== "—" ? m.released.slice(0, 4) : "n.d.";
+    dom.citeBlock.textContent = m
+      ? `${m.pdbId.toUpperCase()}. Deposited ${m.deposited ? m.deposited.slice(0, 10) : "?"}; released ${m.released ? m.released.slice(0, 10) : "?"}.${up ? ` UniProt ${up}.` : ""} Method ${m.method}${m.resolution !== "—" ? ", " + m.resolution : ""}. Retrieved from RCSB PDB.`
+      : "Select a structure to generate a citation.";
+  }
+
+  dom.btnCopyCite.addEventListener("click", () => {
+    const txt = dom.citeBlock.textContent;
+    if (!txt || txt.startsWith("Select")) { showToast("Load a structure first", ""); return; }
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(txt).then(
+        () => showToast("Citation copied", "success"),
+        () => showToast("Copy failed", ""));
+    } else {
+      showToast("Clipboard unavailable", "");
+    }
+  });
+
+  // Re-render the record whenever new metadata or analyses arrive.
+  function refreshPresentationIfReady() {
+    if (dom.hierarchy) renderPresentation();
+  }
 
   // ====== BOOTSTRAP ======
   async function init() {

@@ -1,78 +1,141 @@
 # Protein Flow Explorer
 
-An interactive web tool for visualizing and explaining 3D protein structures. Built for
-teaching, presenting, and exploring molecular biology.
+An interactive tool for visualising, measuring and explaining 3D protein structures —
+built for teaching, extended for research.
 
-> **Live demo:** [https://rollroyces.github.io/protein-flow-explorer](https://rollroyces.github.io/protein-flow-explorer)
+> **Live:** https://rollroyces.github.io/protein-flow-explorer/
 
-## What it does
+## How to present a structure bioinformatically
 
-Protein Flow Explorer makes it easy to **understand and explain** 3D biological structures.
-It bundles three complementary modes in a single web app:
+The guiding principle: **a deposited structure is a linked record, not a picture.**
 
-1. **Interactive Controls** — switch between cartoon / surface / sticks / spacefill
-   representations and colour schemes (by chain, secondary structure, hydrophobicity,
-   B-factor, …) to inspect any structure from any angle.
+Most viewers present a model as an object to be admired. Bioinformatics presents it as
+data to be interrogated, where every visual choice encodes a stated quantity and every
+claim resolves to a citable identifier. The **Presentation** tab in the app implements
+this directly; the method is worth stating independently of the code:
 
-2. **Guided Tour** — a scripted, step-by-step walkthrough for each curated protein.
-   Narration cards explain *why* each feature matters, while the camera zooms in on
-   active sites, heme groups, or domain interfaces.
+### 1. Present the evidence hierarchy, in order
 
-3. **Trajectory Playback** — slide or auto-play between two PDB states of the same protein
-   (hemoglobin T→R, kinase open→closed, calmodulin extended→compact, HIV-1 protease
-   apo vs inhibitor-bound). Drag the slider to scrub.
+A structure is nested data. Show each level with its own provenance, never flattened
+into one image:
 
-## Curated library
+```
+Entry           PDB ID, method, resolution      ← is the model right?
+ └─ Entities     polymer entities, chains      ← what is in it?
+     └─ Ligands  non-polymer entities         ← what binds it?
+         └─ Residues  modelled, SS annotation  ← what is resolved?
+             └─ Atoms  coordinates, B-factor  ← how confident are they?
+```
 
-8 teaching-grade proteins are preloaded with educational context:
+Residue count, chain list and ligand identities each belong at their own level. A viewer
+that shows "574 residues" without saying which chains are modelled, or which ligands
+were co-crystallised, is withholding the provenance that makes the number meaningful.
 
-| Protein                  | PDB IDs         | Tour                              | Trajectory                      |
-| ----------------------- | --------------- | --------------------------------- | ------------------------------- |
-| Hemoglobin              | 2DN2, 1HHO      | Oxygen-binding journey            | T → R allosteric transition     |
-| Hen Egg-White Lysozyme  | 1LYZ            | Catalytic mechanism               | —                               |
-| HIV-1 Protease          | 1HVR, 2PC1      | Drug-target walkthrough           | Apo vs inhibitor-bound          |
-| Adenylate Kinase        | 4AKE, 1AKE      | Induced-fit domain motion         | Open → closed                   |
-| Sperm Whale Myoglobin   | 1MBO            | First solved structure            | —                               |
-| Calmodulin              | 1CLL, 1CDL      | Calcium-triggered switch          | Extended → compact              |
-| Insulin Hexamer         | 4INS            | From hexamer to hormone           | —                               |
-| T4 Lysozyme             | 1L63            | Folding stability sandbox         | —                               |
+### 2. Make colour quantitative and declared
 
-All structures are loaded live from the open-access
-[RCSB Protein Data Bank](https://www.rcsb.org) — no server-side storage required.
+Every colour must encode a named quantity, and the user must be told which:
 
-## Tech
+| Colour scheme | Encodes | Use it to |
+|---|---|---|
+| By chain | polymer entity | locate a subunit across a complex |
+| Secondary structure | helix / strand / coil | read fold architecture |
+| Spectrum (N→C) | residue index | follow a sequence walk, spot domain boundaries |
+| B-factor | atomic displacement (Å²) | read flexibility in the crystal |
+| pLDDT | prediction confidence (0–100) | judge an AlphaFold model's trust |
+| Conservation | MSA column identity | find functional sites |
+| Hydrophobicity | Kyte–Doolittle | find a ligand-facing face |
 
-- **Rendering:** [3Dmol.js](https://3dmol.org) (WebGL)
-- **Data:** RCSB PDB
-- **Frontend:** Vanilla HTML + CSS + JavaScript, no build step
-- **Hosting:** GitHub Pages
+Decorative colour is a lie: it implies a signal that is not there. The app renders this
+as a clickable **Annotation key** — selecting a row applies that scheme to the viewer.
 
-## Local development
+### 3. State two independent kinds of uncertainty
+
+These are routinely conflated, and conflating them is how bad conclusions get made:
+
+- **Is the model right?** — method and resolution bound how much you can trust
+  coordinate positions. ≤ 1.8 Å: side-chain rotamers are usually reliable.
+  > 3.0 Å: loops and distal side chains may be unmodelled entirely.
+- **Is this region ordered?** — B-factor or pLDDT bound how much you can trust the
+  *conformation* of a specific stretch. A well-resolved entry can still contain long
+  disordered loops with well-measured high B-factors.
+
+A conclusion drawn from a high-B-factor loop at 2.5 Å resolution fails on both counts.
+
+### 4. Keep identifiers resolvable
+
+Every claim must resolve to a stable ID: PDB entry, UniProt accession (via SIFTS),
+chain and residue numbers, ClinVar variant. A finding that cannot be cited cannot be
+reproduced. The **Cross-references** panel lists them for the loaded record, and the app
+generates a one-line citation.
+
+### 5. Quantify alongside the 3D view
+
+The 3D pane is one projection. The payload is the numbers: RMSD per residue, pocket
+volume and enclosure, contact lists with distances, physicochemical descriptors,
+conservation scores, mutation impact. Both belong on screen together — the picture
+without the numbers is not evidence.
+
+## Features
+
+### For students
+- **Representation** — cartoon / surface / sticks / spacefill / ribbon / lines, with
+  six colour schemes
+- **Guided tours** — scripted narrated walkthroughs for the curated proteins
+- **Trajectory playback** — hemoglobin T→R, adenylate kinase open→closed,
+  calmodulin extended→compact, HIV-1 protease apo vs inhibitor-bound
+
+### For researchers
+- **Measurement** — click atoms for distances (Å), angles (°), dihedrals (τ)
+- **Sequence panel** — click any residue to locate and highlight it in 3D; SS overlay
+- **UniProt / AlphaFold lookup** — type `TP53` or `P04637`
+- **Structure comparison** — superimpose on Cα, colour by per-residue RMSD
+- **Conservation (MSA)** — ~10 UniProt homologs aligned in-browser
+- **pLDDT colouring** — AlphaFold confidence from the B-factor column
+- **ClinVar variants** — cancer-associated variants by clinical significance
+- **Pocket detection** — Fpocket-style concavity scan, validated against ground truth
+- **Ligand contacts** — H-bonds (3.5 Å), salt bridges (4.0 Å), π (5.5 Å), hydrophobic
+- **Ligand properties** — MW, HBD/HBA, TPSA, cLogP, Lipinski Ro5, Veber
+- **Mutation impact** — packing density and pocket membership for a point mutation
+- **Export** — visible chains as PDB (PyMOL / ChimeraX), measurements as CSV
+- **Share link** — the current view encoded in the URL
+
+## Library
+
+13 curated entries with educational context: hemoglobin, lysozyme, HIV-1 protease,
+adenylate kinase, myoglobin, calmodulin, insulin, T4 lysozyme, p53, EGFR + erlotinib,
+KRAS G12C + sotorasib, type II collagen, aggrecan.
+
+Load anything else by PDB ID, gene symbol, UniProt accession, or by dropping a
+`.pdb` / `.cif` file.
+
+## Development
 
 ```bash
-# Clone or download this folder
-cd protein-viz
-
-# Serve any way you like
-python3 -m http.server 8765
-# then open http://localhost:8765
+python3 -m http.server 8765   # then open http://localhost:8765
+node test/bio.test.js         # 48 assertions over the analysis routines
 ```
 
-That's it — no `npm install`, no bundler.
+No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
 
-## File structure
+## Notes on method
 
-```
-protein-viz/
-├── index.html        # Single-page app entry
-├── styles.css        # All styles
-├── app.js            # Application logic (viewer, tours, trajectories)
-├── data/
-│   └── proteins.js   # Protein library, tours, trajectories
-└── README.md
-```
+- **Pocket detection** follows Fpocket's concavity principle rather than raw density:
+  a pocket must sit in a genuine void, have walls, be globally enclosed, and clear a
+  32-ray enclosure test that separates concave pockets from convex grooves. Validated
+  on EGFR/erlotinib (1M17), where the top-ranked pocket is fully occupied by the
+  crystallographic ligand. Reported volumes are grid estimates — use them to rank,
+  not as absolute numbers.
+- **Packing density** uses the conventional CA-to-CA definition within 8 Å. Thresholds
+  are calibrated against oxymyoglobin (1MBO): buried ≥ 10, moderate ≥ 6.
+- **R-factors** are read from the `refine` / `refine_hist` blocks under capital-R
+  mmCIF keys; entries that genuinely lack them show an em dash.
+- **Hydrogen bonds** are geometric N/O–N/O contacts under 3.5 Å, not computed with
+  explicit hydrogens. Treat as a shortlist, not a definitive list.
 
-## License
+## Licence
 
-Open-access teaching tool. PDB structures are public domain; 3Dmol.js is BSD-licensed.
-Please cite RCSB PDB and 3Dmol.js when reusing this work.
+Educational tool, not for clinical use. Structure data from
+[RCSB PDB](https://www.rcsb.org) and [AlphaFold DB](https://alphafold.ebi.ac.uk);
+identifiers from [UniProt](https://www.uniprot.org) and
+[ClinVar](https://www.ncbi.nlm.nih.gov/clinvar). Rendering by
+[3Dmol.js](https://3dmol.org).

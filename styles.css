@@ -1570,3 +1570,175 @@ a:hover { text-decoration: underline; }
   }
   .sequence-panel { max-height: 120px; }
 }
+/* ============== PRESENTATION TAB ============== */
+
+/* Evidence hierarchy */
+.hierarchy {
+  list-style: none;
+  counter-reset: hier;
+  margin-top: 8px;
+}
+.hierarchy li {
+  counter-increment: hier;
+  position: relative;
+  padding: 8px 10px 8px 32px;
+  margin-bottom: 5px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+}
+.hierarchy li::before {
+  content: counter(hier);
+  position: absolute;
+  left: 9px;
+  top: 8px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg-0);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.hierarchy .h-name {
+  font-weight: 600;
+  color: var(--text-0);
+  display: block;
+  margin-bottom: 2px;
+}
+.hierarchy .h-value {
+  color: var(--text-2);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+}
+.hierarchy .h-note {
+  color: var(--text-3);
+  font-size: 10.5px;
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
+/* Cross-reference chips */
+.xref-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 8px;
+}
+.xref {
+  display: grid;
+  grid-template-columns: 92px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+}
+.xref .x-db {
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.xref .x-id {
+  font-family: ui-monospace, Menlo, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.xref .x-id.none { color: var(--text-3); font-weight: 400; font-style: italic; }
+.xref a.x-go {
+  color: var(--text-3);
+  text-decoration: none;
+  font-size: 14px;
+  padding: 0 4px;
+}
+.xref a.x-go:hover { color: var(--accent); }
+
+/* Annotation key */
+.annot-key {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.annot-row {
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 9px;
+  align-items: start;
+  padding: 6px 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.annot-row:hover { background: var(--bg-3); border-color: var(--border-strong); }
+.annot-row.active { border-color: var(--accent); background: var(--bg-3); }
+.annot-swatch {
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid rgba(255,255,255,0.12);
+}
+.annot-row .a-name { font-weight: 600; color: var(--text-0); }
+.annot-row .a-qty {
+  color: var(--text-2);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+}
+.annot-row .a-use { color: var(--text-3); font-size: 10.5px; margin-top: 2px; line-height: 1.4; }
+.annot-row.unavailable { opacity: 0.5; }
+
+/* Uncertainty cards */
+.uncertainty {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 8px;
+}
+.unc {
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-2);
+  font-size: 11.5px;
+}
+.unc .u-q { font-weight: 600; color: var(--text-0); margin-bottom: 3px; }
+.unc .u-a { color: var(--text-2); line-height: 1.5; }
+.unc .u-verdict {
+  display: inline-block;
+  margin-top: 5px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.unc-verdict-good { background: rgba(129,167,132,0.18); color: var(--accent-2); }
+.unc-verdict-warn { background: rgba(255,183,77,0.18); color: var(--accent-warm); }
+.unc-verdict-na   { background: rgba(139,149,163,0.16); color: var(--text-2); }
+
+/* Citation */
+.cite-block {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-1);
+  font-family: ui-monospace, Menlo, monospace;
+}

@@ -166,15 +166,71 @@
     <!-- ----- RIGHT: Modes & Controls ----- -->
     <aside class="panel panel-right">
       <div class="tabs-header">
-        <button class="tab-btn active" data-tab="controls">Controls</button>
+        <button class="tab-btn" data-tab="presentation">Presentation</button>
+        <button class="tab-btn" data-tab="controls">Controls</button>
         <button class="tab-btn" data-tab="tools">Tools</button>
         <button class="tab-btn" data-tab="drug">Drug Design</button>
         <button class="tab-btn" data-tab="tour">Tour</button>
         <button class="tab-btn" data-tab="trajectory">Trajectory</button>
       </div>
 
+      <!-- ----- Presentation Tab (bioinformatics record view) ----- -->
+      <div class="tab-panel" data-tab-panel="presentation">
+        <div class="control-section">
+          <h3>How to read this structure</h3>
+          <p class="muted small">
+            A deposited structure is a record, not a picture. Present it the way
+            bioinformatics consumes it: each level of the hierarchy carries its own
+            provenance, every colour encodes a stated quantity, and every claim resolves
+            to a citable identifier.
+          </p>
+        </div>
+
+        <!-- Evidence hierarchy -->
+        <div class="control-section">
+          <h3>Evidence hierarchy</h3>
+          <ol class="hierarchy" id="hierarchy"></ol>
+        </div>
+
+        <!-- Cross-references -->
+        <div class="control-section">
+          <h3>Cross-references</h3>
+          <p class="muted small">Stable identifiers for the loaded record.</p>
+          <div class="xref-list" id="xref-list"></div>
+        </div>
+
+        <!-- Annotation key -->
+        <div class="control-section">
+          <h3>Annotation key</h3>
+          <p class="muted small">
+            Every colour in this tool encodes a specific quantity. Use the one that
+            answers your question — not the prettiest.
+          </p>
+          <div class="annot-key" id="annot-key"></div>
+        </div>
+
+        <!-- Uncertainty -->
+        <div class="control-section">
+          <h3>Model uncertainty</h3>
+          <p class="muted small">
+            Two independent axes of doubt, often conflated. Read both before trusting a
+            conclusion drawn from this model.
+          </p>
+          <div class="uncertainty" id="uncertainty"></div>
+        </div>
+
+        <!-- Citation block -->
+        <div class="control-section">
+          <h3>Cite this record</h3>
+          <div class="cite-block" id="cite-block"></div>
+          <div class="highlight-actions" style="margin-top:8px">
+            <button class="btn btn-secondary btn-tiny" id="btn-copy-cite">⧉ Copy citation</button>
+          </div>
+        </div>
+      </div>
+
       <!-- ----- Controls Tab ----- -->
-      <div class="tab-panel active" data-tab-panel="controls">
+      <div class="tab-panel" data-tab-panel="controls">
         <div class="control-section">
           <h3>Representation</h3>
           <div class="control-grid">
