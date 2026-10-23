@@ -712,6 +712,32 @@ Static analysis cannot catch an API-field mix-up. Rendering assertions —
 checking what colour the pixels actually come out — can, and should have been
 part of this audit's scope from the start.
 
+### Two more defects found while building the variant panel
+
+Both were found by using the code, not by reading it.
+
+- **The Needleman–Wunsch traceback could hang the browser.** When the two
+  sequences differed enough in length, the traceback reached column zero
+  with rows left to consume, read an unwritten traceback cell, took the
+  "left" branch and indexed `b[-1]` — `undefined`. It then counted down
+  past zero forever while the alignment string grew until V8 threw
+  "Invalid string length". On random inputs the original hung on **177 of
+  400** pairs; the fix completes all 400 and is byte-identical to the
+  original on every input the original handled. Same-length sequences —
+  the shape the conservation feature aligns — never triggered it, which
+  is why it stayed hidden for so long. Aligning a 1,200-residue UniProt
+  sequence against a 312-residue construct hits it every time.
+
+- **HTTP 429 was treated as a final answer.** The network layer retried 5xx
+  and network failures but returned any other 4xx untouched, on the
+  reasoning that a 404 is a real answer. 429 is the exception: it means
+  "too fast", not "no such thing", and NCBI E-utilities answer it above
+  three requests a second. The layer now retries it with a longer backoff,
+  and the app paces itself accordingly.
+
+Both are the same failure mode as the colour bug: a case the happy path
+never reaches, and no assertion covering the unhappy path.
+
 ---
 
 ## 11. Verification
