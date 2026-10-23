@@ -92,6 +92,7 @@
     variants: [],            // [{resi, chain, mutation, significance, color}]
     variantByResidue: new Map(),   // "chain:resi" -> colour, for the variant scheme
     variantRateLimited: false,     // gnomAD refused some frequency lookups
+    variantLookupErrors: 0,        // gnomAD lookups that failed outright
     _uniprotInfo: null,      // cached {accession, gene, sequence} for the loaded structure
     pockets: [],             // [{id, center:[x,y,z], volume, score, residues:[{chain,resi}]}]
     ligandContacts: null,    // {ligandName, residue, contacts:[{chain,resi,resn,distance,type}]}
@@ -1976,13 +1977,44 @@
   /** Ask gnomAD for the population allele frequency of each variant. */
   async function fetchGnomadFrequencies(variants) {
     state.variantRateLimited = false;
+    state.variantLookupErrors = 0;
     const byId = new Map();
-    // Most significant first, so the bounded number of lookups goes to the
-    // variants that matter rather than to whichever came first.
-    const ordered = [...variants].sort(
-      (a, b) => significanceRank(a.significance) - significanceRank(b.significance) || a.pos - b.pos);
+    // Take the most significant first, but round-robin across the classes so
+    // that a bounded number of lookups still covers drug-response and the
+    // other clinically interesting classes, not just the pathogenic ones.
+    const byClass = new Map();
+    for (const v of variants) {
+      if (!v.gnomadId) continue;
+      const k = v.significance;
+      if (!byClass.has(k)) byClass.set(k, []);
+      byClass.get(k).push(v);
+    }
+    // Within a class, the variants worth a frequency lookup are the ones a
+    // clinician would name: those reviewed by an expert panel, those with a
+    // Tier I somatic impact, and then by position.
+    const tierRank = (v) => (v.tier && /^Tier I/i.test(v.tier) ? 0 : v.tier ? 1 : 2);
+    const reviewRank = (v) =>
+      (/expert panel/i.test(v.review || "") ? 0 : /practice guideline/i.test(v.review || "") ? 1 : 2);
+    for (const list of byClass.values()) {
+      list.sort((a, b) =>
+        tierRank(a) - tierRank(b) ||
+        reviewRank(a) - reviewRank(b) ||
+        a.pos - b.pos);
+    }
+    const classes = [...byClass.keys()].sort(
+      (a, b) => significanceRank(a) - significanceRank(b));
+    const queues = classes.map((k) => byClass.get(k).slice());
+    const ordered = [];
+    let more = true;
+    while (more) {
+      more = false;
+      for (const q of queues) {
+        const v = q.shift();
+        if (v) { ordered.push(v); more = true; }
+      }
+    }
     for (const v of ordered) {
-      if (v.gnomadId && !byId.has(v.gnomadId)) byId.set(v.gnomadId, v);
+      if (!byId.has(v.gnomadId)) byId.set(v.gnomadId, v);
     }
     const ids = [...byId.keys()].slice(0, GNOMAD_MAX_LOOKUPS);
     for (let i = 0; i < ids.length; i += GNOMAD_CHUNK) {
@@ -2013,10 +2045,15 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
       });
-      const j = r.ok ? await r.json() : null;
+      // The body has to be read even on a non-2xx: gnomAD reports its rate
+      // limit with HTTP 400 and the message "Query rate limit exceeded", and
+      // that message is the only way to tell "we were throttled" apart from
+      // "this variant is not in gnomAD".
+      let j = null;
+      try { j = await r.json(); } catch (e) { /* not json */ }
       const message = j && j.errors && j.errors.length ? String(j.errors[0].message || "") : "";
       if (/rate limit|too many/i.test(message)) return { rateLimited: true };
-      if (!r.ok) return { absent: true };
+      if (!r.ok) return { error: true };
       if (j.errors && j.errors.length) return { absent: true };   // "Variant not found"
       const v = j.data && j.data.variant;
       if (!v) return { absent: true };
@@ -2024,7 +2061,9 @@
       if (v.exome && typeof v.exome.af === "number") return { af: v.exome.af, source: "exome" };
       return { absent: true };
     } catch (e) {
-      return { rateLimited: /429|rate/i.test(e.message || "") };
+      const msg = e && e.message ? e.message : "";
+      if (/429|rate limit/i.test(msg)) return { rateLimited: true };
+      return { error: true };
     }
   }
 
@@ -2082,6 +2121,7 @@
         const target = byId.get(id);
         if (!hit || !target) return;
         if (hit.rateLimited) { state.variantRateLimited = true; return; }
+        if (hit.error) { state.variantLookupErrors = (state.variantLookupErrors || 0) + 1; return; }
         if (hit.absent) { target.afAbsent = true; return; }
         target.af = hit.af;
         target.afSource = hit.source;
@@ -2312,6 +2352,13 @@
         ? `<br><span class="muted small">gnomAD rate-limited some frequency lookups; ` +
           `those rows show no frequency rather than a wrong one.</span>`
         : "") +
+      (state.variantLookupErrors
+        ? `<br><span class="muted small">${state.variantLookupErrors} gnomAD lookups failed; ` +
+          `those rows show no frequency rather than a wrong one.</span>`
+        : "") +
+      `<br><span class="muted small">Population frequencies are looked up for the ` +
+      `${GNOMAD_MAX_LOOKUPS} most significant changes only; gnomAD is a population ` +
+      `reference, so a somatic driver is often absent from it.</span>` +
       table;
 
     // Clicking a row focuses that residue.
