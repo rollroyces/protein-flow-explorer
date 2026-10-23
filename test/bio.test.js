@@ -53,7 +53,7 @@ vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8")
 
 // The extracted pure modules publish themselves on the PFE namespace and must
 // be loaded before app.js, which destructures them.
-for (const m of ["seq", "geometry", "pockets"]) {
+for (const m of ["seq", "geometry", "pockets", "colors"]) {
   vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", `${m}.js`), "utf8"),
     { filename: `src/${m}.js` });
 }
@@ -61,10 +61,11 @@ for (const m of ["seq", "geometry", "pockets"]) {
 const src = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
 const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration,\n" +
-  "    isAbort, currentNetGeneration: () => netGeneration, plddtToColor,\n" +
+  "    isAbort, currentNetGeneration: () => netGeneration,\n" +
   "    midPoint, computeDistance, computeAngle,\n" +
   "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
-  "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
+  "    resolveColor, chainColorFunc, domainColorFunc, state,\n" +
+  "    STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
   "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +
   "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF,\n" +
   "    POCKET_MIN_ENCLOSURE, POCKET_MIN_WALL, POCKET_MIN_GLOBAL, POCKET_CLUSTER_R };\n})();");
@@ -84,10 +85,12 @@ function check(name, cond, detail = "") {
 }
 
 console.log("\npLDDT thresholds (AlphaFold convention)");
-check("pLDDT 95 -> deep blue",  P.plddtToColor(95) === 0x0053d6);
-check("pLDDT 85 -> cyan",       P.plddtToColor(85) === 0x65cbf3);
-check("pLDDT 60 -> yellow",     P.plddtToColor(60) === 0xffdb13);
-check("pLDDT 20 -> orange",     P.plddtToColor(20) === 0xff7d45);
+// The mapping lives in src/colors.js and is covered in test/colors.test.js.
+const { plddtColor } = globalThis.PFE.colors;
+check("pLDDT 95 -> deep blue",  plddtColor(95) === 0x0053d6);
+check("pLDDT 85 -> cyan",       plddtColor(85) === 0x65cbf3);
+check("pLDDT 60 -> yellow",     plddtColor(60) === 0xffdb13);
+check("pLDDT 20 -> orange",     plddtColor(20) === 0xff7d45);
 
 console.log("\nGeometry");
 check("distance 3-4-0 = 5", near(P.computeDistance({x:0,y:0,z:0},{x:3,y:4,z:0}), 5, 1e-9));
@@ -108,9 +111,69 @@ check("all visible on white",    lum.every((l) => l > 40),
 
 console.log("\nColour routing");
 check("chain -> colorfunc", typeof P.resolveColor("chain", 1).colorfunc === "function");
-check("spectrum passes through", P.resolveColor("spectrum", 1).color === "spectrum");
+check("spectrum -> colorfunc", typeof P.resolveColor("spectrum", 1).colorfunc === "function");
+check("ss -> colorfunc", typeof P.resolveColor("ss", 1).colorfunc === "function");
+check("byElement -> 3Dmol scheme", P.resolveColor("byElement", 1).colorscheme === "Jmol");
+check("residue -> 3Dmol scheme", P.resolveColor("residue", 1).colorscheme === "amino");
+check("uniform -> literal colour",
+      typeof P.resolveColor("uniform", 1).color === "string" &&
+      P.resolveColor("uniform", 1).color.startsWith("#"));
 check("colorfunc returns palette colour",
       pal.includes(P.chainColorFunc({ chain: "A" })));
+
+// Every option in the colour dropdown must produce a spec 3Dmol can honour.
+// This is the regression guard for the bug where a scheme NAME was put in
+// 3Dmol's `color` field: 3Dmol treats that field as a LITERAL colour, so any
+// name that is not an html colour name falls through to 0x000000 and the
+// whole structure renders black.
+console.log("\nColour dropdown produces valid 3Dmol specs");
+const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+const selectStart = html.indexOf('id="ctrl-color"');
+const selectEnd = html.indexOf("</select>", selectStart);
+const selectBlock = html.slice(selectStart, selectEnd);
+const options = [...selectBlock.matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+check("colour dropdown has 11 options", options.length === 11, `(${options.length})`);
+const badSpecs = [];
+for (const opt of options) {
+  const s = P.resolveColor(opt, 1);
+  const ok = typeof s.colorfunc === "function"
+    || typeof s.colorscheme === "string"
+    || (typeof s.color === "string" && s.color.startsWith("#"))
+    || typeof s.color === "number";
+  if (!ok) badSpecs.push(opt);
+}
+check("every dropdown option yields a renderable spec", badSpecs.length === 0,
+      badSpecs.length ? `(${badSpecs.join(", ")})` : "");
+const namedColour = options.filter((o) => {
+  const s = P.resolveColor(o, 1);
+  return typeof s.color === "string" && !s.color.startsWith("#");
+});
+check("no scheme name is passed as a literal colour", namedColour.length === 0,
+      namedColour.length ? `(${namedColour.join(", ")})` : "");
+
+console.log("\nDomain colouring");
+const AK_DOMAINS = [
+  { name: "NMP", color: "#2f7ed8", ranges: [{ start: 1, end: 41 }] },
+  { name: "CORE", color: "#9aa0a6", ranges: [{ start: 42, end: 118 }] },
+  { name: "LID", color: "#cc1f1f", ranges: [{ start: 119, end: 214 }] },
+];
+P.state.currentProtein = { id: "adenylate-kinase", domains: AK_DOMAINS };
+const hexOf = (atom) => "0x" + P.domainColorFunc(atom).toString(16).padStart(6, "0");
+check("NMP residue is blue", hexOf({ chain: "A", resi: 10 }) === "0x2f7ed8",
+      `(${hexOf({ chain: "A", resi: 10 })})`);
+check("CORE residue is grey", hexOf({ chain: "A", resi: 80 }) === "0x9aa0a6",
+      `(${hexOf({ chain: "A", resi: 80 })})`);
+check("LID residue is red", hexOf({ chain: "A", resi: 200 }) === "0xcc1f1f",
+      `(${hexOf({ chain: "A", resi: 200 })})`);
+check("domain colours are distinct",
+      new Set([10, 80, 200].map((r) => P.domainColorFunc({ chain: "A", resi: r }))).size === 3);
+check("both dimer chains are coloured the same",
+      hexOf({ chain: "B", resi: 10 }) === hexOf({ chain: "A", resi: 10 }));
+check("residue outside every domain falls back to grey",
+      hexOf({ chain: "A", resi: 999 }) === "0x9aa0a6");
+P.state.currentProtein = { id: "no-domains" };
+check("a protein without domains falls back to chain colouring",
+      P.domainColorFunc({ chain: "A", resi: 10 }) === P.chainColorFunc({ chain: "A" }));
 
 console.log("\nMSA / conservation");
 const fam = [

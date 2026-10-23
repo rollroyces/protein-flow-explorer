@@ -28,6 +28,8 @@
   const { midPoint, cross, dot, computeDistance, computeAngle, computeDihedral,
           computePerResidueRmsd } = PFE.geometry;
   const { buildAtomHash, countAtomsNear, rayHits, enclosureFraction } = PFE.pockets;
+  const { STRUCT_CHAIN_PALETTE, ssColor, spectrumColor, bfactorColor,
+          hydrophobicityColor, plddtColor, conservationColor } = PFE.colors;
 
   // ====== GLOBAL STATE ======
   const state = {
@@ -42,6 +44,10 @@
     currentOpacity: 1,
     background: "white",
     spinning: false,
+
+    // Value ranges of the loaded structure, used to scale the spectrum and
+    // B-factor colour ramps. Recomputed whenever a structure is loaded.
+    colorRange: { resiMin: 0, resiMax: 1, bMin: 0, bMax: 1 },
 
     // Frame counter
     fpsFrames: 0,
@@ -839,6 +845,8 @@
       state._lastPdbText = results[0].data;
       state._lastPdbFormat = results[0].format;
 
+      computeColorRanges(state.models[0]);
+
       applyAllStyles();
       state.viewer.zoomTo();
       state.viewer.render();
@@ -895,19 +903,7 @@
   // 3Dmol's built-in 'chain' scheme is a poor palette: chains B/J/O/P/R/T render as
   // grey or near-black, and the rest are washed-out pastels. We use our own
   // colourblind-friendly palette via colorfunc so every chain is clearly distinct
-  // regardless of its letter.
-  const STRUCT_CHAIN_PALETTE = [
-    0x2f7ed8, // blue
-    0xef553b, // red-orange
-    0x00a878, // teal-green
-    0xf2b705, // amber
-    0x9b5de5, // violet
-    0x00b4d8, // cyan
-    0xe76f51, // coral
-    0x6a994e, // olive
-    0xc77dff, // lilac
-    0xff8fab, // pink
-  ];
+  // regardless of its letter. The palette itself lives in src/colors.js.
   function chainColorFunc(atom) {
     const idx = chainIndex(atom.chain);
     return STRUCT_CHAIN_PALETTE[idx % STRUCT_CHAIN_PALETTE.length];
@@ -922,6 +918,30 @@
       state._chainOrder.push(key);
     }
     return i;
+  }
+
+  // Value ranges of the loaded structure, so the spectrum and B-factor ramps
+  // span the actual data instead of a fixed 0–100 window.
+  function computeColorRanges(model) {
+    const atoms = safeSelect(model, {});
+    let resiMin = Infinity, resiMax = -Infinity;
+    let bMin = Infinity, bMax = -Infinity;
+    for (const a of atoms) {
+      if (typeof a.resi === "number" && Number.isFinite(a.resi)) {
+        if (a.resi < resiMin) resiMin = a.resi;
+        if (a.resi > resiMax) resiMax = a.resi;
+      }
+      if (typeof a.b === "number" && Number.isFinite(a.b)) {
+        if (a.b < bMin) bMin = a.b;
+        if (a.b > bMax) bMax = a.b;
+      }
+    }
+    state.colorRange = {
+      resiMin: Number.isFinite(resiMin) ? resiMin : 0,
+      resiMax: Number.isFinite(resiMax) ? resiMax : 1,
+      bMin: Number.isFinite(bMin) ? bMin : 0,
+      bMax: Number.isFinite(bMax) ? bMax : 1,
+    };
   }
 
   function applyAllStyles() {
@@ -943,14 +963,107 @@
     }
   }
 
-  // Resolve a colour-scheme name to a 3Dmol colour spec.
-  // "chain" and "byDomain" are handled by us; everything else is passed to 3Dmol,
-  // which knows spectrum / ss / element / residue / hydrophobicity / bFactor.
-  function resolveColor(colorName, opacity) {
-    if (colorName === "chain" || colorName === "byDomain") {
-      return { colorfunc: chainColorFunc, opacity };
+  // ----- colour functions -----
+  // Each of these returns an RGB integer for one atom and is handed to 3Dmol
+  // as a `colorfunc`. They are used instead of 3Dmol's own schemes so that
+  // the colours match the annotation key exactly, and so that the same colour
+  // applies to every representation (cartoon, stick, sphere, line, surface).
+
+  const DOMAIN_FALLBACK_COLOR = 0x9aa0a6;     // grey — residue outside any domain
+  const CONSERVATION_MISSING_COLOR = 0xcccccc; // grey — residue not in the alignment
+
+  /** Colour by the annotated domain of the residue. */
+  function domainColorFunc(atom) {
+    const domains = state.currentProtein && state.currentProtein.domains;
+    if (!domains || !domains.length) return chainColorFunc(atom);
+    const resi = atom.resi;
+    if (typeof resi !== "number") return DOMAIN_FALLBACK_COLOR;
+    for (const d of domains) {
+      for (const r of d.ranges) {
+        if (r.chain && r.chain !== atom.chain) continue;
+        if (resi >= r.start && resi <= r.end) return hexToInt(d.color);
+      }
     }
-    return { color: colorName, opacity };
+    return DOMAIN_FALLBACK_COLOR;
+  }
+
+  function ssColorFunc(atom) {
+    return ssColor(atom.ss);
+  }
+
+  function spectrumColorFunc(atom) {
+    const r = state.colorRange;
+    return spectrumColor(atom.resi, r.resiMin, r.resiMax);
+  }
+
+  function bfactorColorFunc(atom) {
+    const r = state.colorRange;
+    return bfactorColor(atom.b, r.bMin, r.bMax);
+  }
+
+  function hydrophobicityColorFunc(atom) {
+    return hydrophobicityColor(atom.resn);
+  }
+
+  function plddtColorFunc(atom) {
+    return plddtColor(atom.b);
+  }
+
+  function conservationColorFunc(atom) {
+    const cons = state.conservation;
+    if (!cons || !cons.byResidue) return CONSERVATION_MISSING_COLOR;
+    const c = cons.byResidue.get(`${atom.chain}:${atom.resi}`);
+    if (c === undefined) return CONSERVATION_MISSING_COLOR;
+    return conservationColor(c);
+  }
+
+  /** "#2f7ed8" -> 0x2f7ed8 */
+  function hexToInt(hex) {
+    if (typeof hex !== "string") return DOMAIN_FALLBACK_COLOR;
+    const v = parseInt(hex.replace("#", ""), 16);
+    return Number.isFinite(v) ? v : DOMAIN_FALLBACK_COLOR;
+  }
+
+  // Resolve a colour-scheme name to a 3Dmol colour spec.
+  //
+  // 3Dmol has two different fields here and they are easy to confuse:
+  //
+  //   style.color      a LITERAL colour — hex, number, or html colour name
+  //   style.colorscheme  the NAME of a colour scheme
+  //
+  // A scheme name put in `color` is looked up as a literal colour, fails, and
+  // falls back to 0x000000 — the structure renders black. Every scheme below
+  // therefore goes out either as `colorscheme` (3Dmol's own schemes) or as
+  // `colorfunc` (ours, so the colours match the annotation key and work for
+  // every representation).
+  function resolveColor(colorName, opacity) {
+    switch (colorName) {
+      case "chain":
+        return { colorfunc: chainColorFunc, opacity };
+      case "byDomain":
+        return { colorfunc: domainColorFunc, opacity };
+      case "ss":
+        return { colorfunc: ssColorFunc, opacity };
+      case "spectrum":
+        return { colorfunc: spectrumColorFunc, opacity };
+      case "bFactor":
+        return { colorfunc: bfactorColorFunc, opacity };
+      case "hydrophobicity":
+        return { colorfunc: hydrophobicityColorFunc, opacity };
+      case "pLDDT":
+        return { colorfunc: plddtColorFunc, opacity };
+      case "conservation":
+        return { colorfunc: conservationColorFunc, opacity };
+      case "byElement":
+        return { colorscheme: "Jmol", opacity };
+      case "residue":
+        return { colorscheme: "amino", opacity };
+      case "uniform":
+        // Visible against whichever background is selected.
+        return { color: state.background === "black" ? "#e8e8e8" : "#7f8c9b", opacity };
+      default:
+        return { colorscheme: colorName, opacity };
+    }
   }
 
   function getStyleSpec(styleName, colorName, opacity) {
@@ -1537,28 +1650,21 @@
 
   // ====== BIOINFORMATICS: pLDDT, Conservation, Variants, Pockets, Ligand Contacts ======
 
-  // pLDDT coloring: AlphaFold models store pLDDT (0–100) in the B-factor column.
-  // Color scheme follows the AlphaFold convention:
-  //   pLDDT >= 90 → very high confidence  (deep blue)
-  //   pLDDT >= 70 → confident             (light blue / cyan)
-  //   pLDDT >= 50 → low                   (yellow)
-  //   pLDDT <  50 → very low             (orange)
-  function plddtToColor(p) {
-    if (p >= 90) return 0x0053d6;        // deep blue
-    if (p >= 70) return 0x65cbf3;        // cyan
-    if (p >= 50) return 0xffdb13;        // yellow
-    return 0xff7d45;                     // orange
-  }
+  // pLDDT colouring: AlphaFold models store pLDDT (0–100) in the B-factor column.
+  // The colour mapping itself lives in src/colors.js (plddtColor), so the
+  // button and the colour dropdown produce identical results.
   function colorByPLDDT() {
     if (!state.models.length) {
       showCustomError("No structure loaded.");
       return;
     }
     if (!state.viewer) return;
-    state.viewer.setStyle({}, {
-      cartoon: { colorfunc: (atom) => plddtToColor(atom.b) },
-    });
-    state.viewer.render();
+    // Switch the colour scheme rather than stamping a style over the model.
+    // Stamping forced cartoon on top of whatever representation was selected
+    // and was undone by the next style change.
+    state.currentColor = "pLDDT";
+    dom.ctrlColor.value = "pLDDT";
+    onStyleChange();
     showToast("Coloured by AlphaFold pLDDT confidence", "success");
   }
   dom.btnColorPlddt.addEventListener("click", colorByPLDDT);
@@ -1659,19 +1765,12 @@
         }
         state.conservation = { byResidue: conservationByResidue, homologs: allSeqs.length - 1 };
 
-        // Color structure by conservation
-        state.viewer.setStyle({}, {
-          cartoon: { colorfunc: (atom) => {
-            const c = conservationByResidue.get(`${atom.chain}:${atom.resi}`);
-            if (c === undefined) return 0xcccccc;
-            // 0 (variable) → blue, 1 (highly conserved) → deep red
-            const t = c;
-            const r = Math.round(0x5b + (0xcc - 0x5b) * t);
-            const g = Math.round(0x8d + (0x1f - 0x8d) * t);
-            const b = Math.round(0xef + (0x1f - 0xef) * t);
-            return (r << 16) | (g << 8) | b;
-          } },
-        });
+        // Colour the structure by conservation. Switch the colour scheme
+        // rather than stamping a style, so the map applies to the current
+        // representation and survives a later style change.
+        state.currentColor = "conservation";
+        dom.ctrlColor.value = "conservation";
+        applyAllStyles();
         state.viewer.render();
         dom.conservationStatus.textContent = `Conservation: ${allSeqs.length - 1} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
         showToast("Conservation map applied", "success");
@@ -1689,6 +1788,9 @@
   dom.btnFetchConservation.addEventListener("click", loadConservation);
   dom.btnClearConservation.addEventListener("click", () => {
     state.conservation = null;
+    // Conservation is no longer available, so fall back to a scheme that is.
+    state.currentColor = "chain";
+    dom.ctrlColor.value = "chain";
     applyAllStyles();
     state.viewer.render();
     dom.conservationStatus.textContent = "No conservation loaded.";
@@ -3036,6 +3138,12 @@
       use: "Locating a domain or subunit across a complex.",
     },
     {
+      id: "byDomain", name: "By domain", quantity: "annotated structural domain",
+      grad: "linear-gradient(90deg,#2f7ed8,#9aa0a6,#cc1f1f)",
+      use: "Separating the parts of a multi-domain protein that move independently.",
+      needs: "domains",
+    },
+    {
       id: "ss", name: "Secondary structure", quantity: "helix / strand / coil (HELIX + SHEET records)",
       grad: "linear-gradient(90deg,#ef5350,#f5c542,#9aa0a6)",
       use: "Reading fold architecture; finding helices that pack into the core.",
@@ -3137,6 +3245,7 @@
       crystal: !!m && /X-RAY|NMR|EM|ELECTRON|CRYO/.test(m.method || ""),
       alphafold: !!isAF,
       conservation: !!state.conservation,
+      domains: !!(state.currentProtein && state.currentProtein.domains && state.currentProtein.domains.length),
     };
     dom.annotKey.innerHTML = ANNOTATIONS.map((a) => {
       const ok = !a.needs || available[a.needs];

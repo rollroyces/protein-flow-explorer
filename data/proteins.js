@@ -78,6 +78,17 @@ const PROTEINS = [
       "Adenylate kinase balances cellular ATP/ADP/AMP by transferring a phosphoryl group. It undergoes one of the largest known substrate-induced domain closures: the LID and NMP domains close over the bound nucleotides during catalysis.",
     category: "allostery",
     color: "#f59e0b",
+    // Three-domain decomposition of E. coli adenylate kinase (214 residues),
+    // the boundaries used in the domain-motion literature (Muller et al. 1996;
+    // Pontiggia et al. 2008). Verified against the HELIX records of 4AKE and
+    // 1AKE: NMP 1-41 (helices 13-24, 31-40), CORE 42-118 (helices 44-54,
+    // 61-73, 75-77, 90-98), LID 119-214 (helices 161-187, 202-213).
+    // Both chains of the dimer use the same numbering.
+    domains: [
+      { name: "NMP", color: "#2f7ed8", ranges: [{ start: 1, end: 41 }] },
+      { name: "CORE", color: "#9aa0a6", ranges: [{ start: 42, end: 118 }] },
+      { name: "LID", color: "#cc1f1f", ranges: [{ start: 119, end: 214 }] },
+    ],
     highlights: {
       residues: [
         { resi: 10, label: "Gly10 (P-loop)" },
@@ -113,6 +124,16 @@ const PROTEINS = [
       "Calmodulin has two globular domains connected by a flexible α-helix. Upon binding calcium, the helices reorganize and the protein wraps around target kinases, phosphatases, and channels, regulating many calcium-dependent pathways.",
     category: "allostery",
     color: "#ec4899",
+    // Two lobes plus the central linker that connects them. Verified against
+    // the HELIX records: 1CLL has the linker as one helix (65-92) and 1CDL
+    // as two (65-74, 77-93); both structures share the same numbering from
+    // residue 5 up, and 1CLL carries one extra N-terminal Leu at 4.
+    // EF-hands 1 and 2 sit in 5-55, EF-hands 3 and 4 in 101-146.
+    domains: [
+      { name: "N-terminal lobe", color: "#2f7ed8", ranges: [{ start: 4, end: 64 }] },
+      { name: "Central linker", color: "#9aa0a6", ranges: [{ start: 65, end: 93 }] },
+      { name: "C-terminal lobe", color: "#cc1f1f", ranges: [{ start: 94, end: 148 }] },
+    ],
   },
   {
     id: "insulin",

@@ -6,8 +6,8 @@
   "license": "MIT",
   "scripts": {
     "serve": "python3 -m http.server 8765",
-    "test": "node test/analysis.test.js && node test/bio.test.js && node test/net.test.js",
-    "check": "node --check app.js && node --check data/proteins.js && node --check src/seq.js && node --check src/geometry.js && node --check src/pockets.js && node --check test/analysis.test.js && node --check test/bio.test.js && node --check test/net.test.js"
+    "test": "node test/analysis.test.js && node test/colors.test.js && node test/bio.test.js && node test/net.test.js",
+    "check": "node --check app.js && node --check data/proteins.js && node --check src/seq.js && node --check src/geometry.js && node --check src/pockets.js && node --check src/colors.js && node --check test/analysis.test.js && node --check test/colors.test.js && node --check test/bio.test.js && node --check test/net.test.js"
   },
   "devDependencies": {}
 }
