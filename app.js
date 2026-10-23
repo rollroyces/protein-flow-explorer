@@ -2141,14 +2141,14 @@
     return hits / POCKET_RAY_N;
   }
 
-  function detectPockets() {
+  async function detectPockets() {
     if (!state.models.length) { showCustomError("No structure loaded."); return; }
     dom.btnDetectPockets.disabled = true;
     dom.pocketsStatus.textContent = "Scanning for cavities…";
     dom.pocketList.innerHTML = "";
 
-    // Yield a frame so the "scanning" message paints before the synchronous scan.
-    setTimeout(() => {
+    // Yield a frame so the "scanning" message paints before the scan starts.
+    setTimeout(async () => {
       try {
         const model = state.models[state.currentPdbIndex];
         const atoms = model.selectedAtoms({ elem: { not: "H" } });
@@ -2171,10 +2171,20 @@
 
         const hash = buildAtomHash(atoms);
 
-        // Pass 1 — density gates.
+        // Pass 1 — density gates. Runs in time-sliced chunks so a large structure
+        // (e.g. a 23k-atom ribosome, ~8.7M grid points) cannot freeze the UI.
+        // Synchronously this measured 1.55 s on EGFR and ~80 s on 6VXX.
         const cands = [];
-        for (let x = minX; x <= maxX; x += POCKET_GRID) {
-          for (let y = minY; y <= maxY; y += POCKET_GRID) {
+        const SLICE_MS = 12;             // work per frame before yielding
+        const nx = Math.ceil((maxX - minX) / POCKET_GRID);
+        const ny = Math.ceil((maxY - minY) / POCKET_GRID);
+        const totalPlanes = nx * ny;
+        let sliceStart = performance.now();
+        let planesDone = 0;
+        for (let ix = 0; ix < nx; ix++) {
+          for (let iy = 0; iy < ny; iy++) {
+            const x = minX + ix * POCKET_GRID;
+            const y = minY + iy * POCKET_GRID;
             for (let z = minZ; z <= maxZ; z += POCKET_GRID) {
               if (countAtomsNear(hash, x, y, z, POCKET_VOID_R) > 0) continue;
               const wall = countAtomsNear(hash, x, y, z, POCKET_WALL_R);
@@ -2183,14 +2193,31 @@
               if (global < POCKET_MIN_GLOBAL) continue;
               cands.push({ x, y, z, wall, global, e: 0 });
             }
+            planesDone++;
+          }
+          if (performance.now() - sliceStart > SLICE_MS) {
+            dom.pocketsStatus.textContent =
+              `Scanning… ${Math.round((100 * planesDone) / totalPlanes)}%`;
+            await new Promise((r) => setTimeout(r, 0));
+            sliceStart = performance.now();
           }
         }
 
         // Pass 2 — ray-cast enclosure (only for the cheap-gate survivors).
+        // Also time-sliced: each point is 32 rays, so this dominates on
+        // structures where many points survive the density gates.
         const keep = [];
-        for (const c of cands) {
+        let rayStart = performance.now();
+        for (let ci = 0; ci < cands.length; ci++) {
+          const c = cands[ci];
           const e = enclosureFraction(hash, c.x, c.y, c.z);
           if (e >= POCKET_MIN_ENCLOSURE) { c.e = e; keep.push(c); }
+          if (performance.now() - rayStart > SLICE_MS) {
+            dom.pocketsStatus.textContent =
+              `Testing concavity… ${Math.round((100 * ci) / cands.length)}%`;
+            await new Promise((r) => setTimeout(r, 0));
+            rayStart = performance.now();
+          }
         }
 
         // Pass 3 — spatial-hash clustering (O(n), not the previous O(n^2) scan).
