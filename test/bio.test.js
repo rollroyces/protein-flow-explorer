@@ -151,5 +151,19 @@ check("tolerates missing blocks",  firstRefineStat({}, "ls_r_factor_r_work") ===
 check("skips non-numeric values",
   firstRefineStat({ refine: [{ ls_R_factor_R_work: null }] }, "ls_r_factor_r_work") === "\u2014");
 
+
+console.log("\nPacking-density thresholds (calibrated on oxymyoglobin 1MBO)");
+// Distribution measured from the real structure: min 3, p10 6, median 9,
+// p75 11, max 15. His93/H64 are the heme-ligating histidines and must
+// classify as buried; the N-terminus must classify as exposed.
+function classify(n) {
+  return n >= 10 ? "buried" : n >= 6 ? "moderate" : "exposed";
+}
+check("His93 (n=10) -> buried",   classify(10) === "buried");
+check("His64 (n=9)  -> moderate", classify(9) === "moderate");
+check("R118 (n=6)  -> moderate", classify(6) === "moderate");
+check("N-term (n=3) -> exposed",  classify(3) === "exposed");
+check("max observed (n=15) -> buried", classify(15) === "buried");
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

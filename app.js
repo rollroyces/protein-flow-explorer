@@ -2956,11 +2956,12 @@
       return;
     }
     const ca = atoms.find((a) => a.atom === "CA") || atoms[0];
-    // Packing density: count DISTINCT neighbouring residues (not atoms) whose Cβ
-    // sits within 8 A. Atom counts scale with side-chain size and badly
-    // misclassify large residues in the core, so compare like with like.
+    // Packing density: count DISTINCT neighbouring residues whose Cβ sits within
+    // 8 A of this residue's Cα. Measuring CA-to-CA (not CA-to-any-atom) keeps the
+    // metric independent of side-chain length and matches the conventional
+    // definition, so large residues are not over-counted.
     const neighbours = new Set();
-    const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) } });
+    const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) }, atom: "CA" });
     for (const a of all) {
       const d = computeDistance(ca, a);
       if (d <= 8) neighbours.add(`${a.chain}:${a.resi}`);
