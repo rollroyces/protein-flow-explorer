@@ -115,18 +115,19 @@ Load anything else by PDB ID, gene symbol, UniProt accession, or by dropping a
 
 ```bash
 python3 -m http.server 8765   # then open http://localhost:8765
-npm test                      # 130 assertions across 3 suites
+npm test                      # 225 assertions across 4 suites
 npm run check                 # syntax-check every JS file
 ```
 
 No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
 
-The scientific core lives in `src/` as three dependency-free modules —
+The scientific core lives in `src/` as four dependency-free modules —
 `seq.js` (sequence parsing, alignment, MSA, conservation), `geometry.js`
-(distance/angle/dihedral/RMSD) and `pockets.js` (spatial hash, density gates,
-ray casting). They load as plain scripts and publish themselves on the `PFE`
-namespace, so they can be `require()`d and unit-tested with no DOM stub at
-all. See [AUDIT.md](AUDIT.md) for the architecture review that motivated the
+(distance/angle/dihedral/RMSD), `pockets.js` (spatial hash, density gates,
+ray casting) and `colors.js` (the colour ramps behind every scheme in the
+colour dropdown). They load as plain scripts and publish themselves on the
+`PFE` namespace, so they can be `require()`d and unit-tested with no DOM stub
+at all. See [AUDIT.md](AUDIT.md) for the architecture review that motivated the
 split.
 
 ## Notes on method

@@ -54,7 +54,7 @@ against the fact that a teacher can hand the folder to a student and it works.
 | Styling | Hand-written CSS | 1,744 lines, CSS custom properties, no framework. |
 | Data | `data/proteins.js` | 660 lines of curated structures, tours and trajectories. |
 | APIs | RCSB Data API, RCSB File API, UniProt REST, AlphaFold DB, NCBI E-utilities | All client-side `fetch`. |
-| Tests | Plain Node, `vm`-based DOM stub | 3 suites, 130 assertions, zero dependencies. |
+| Tests | Plain Node, `vm`-based DOM stub | 4 suites, 225 assertions, zero dependencies. |
 | CI | GitHub Actions | Syntax gate + 3 test suites + dependency audit. |
 | Hosting | GitHub Pages | Deploys on push to `main`. |
 | Package management | `package.json`, **no dependencies** | Scripts only — `serve`, `test`, `check`. |
@@ -654,14 +654,74 @@ test`, `npm run check` and `npm run serve` with zero dependencies.
 
 ---
 
-## 10. Verification
+## 10. Addendum — a defect the audit missed
+
+**Found after this audit was published and fixed in `71ff4b9`.** Recorded here
+because the audit claimed a clean lint baseline, and a reader deserves to know
+that a clean lint baseline did not mean a correct colour pipeline.
+
+Every colour scheme except "By chain" rendered the **entire structure black**.
+
+The cause was a two-field confusion in 3Dmol's API:
+
+```js
+// before — a scheme NAME in the `color` field
+function resolveColor(colorName, opacity) {
+  if (colorName === "chain" || colorName === "byDomain") {
+    return { colorfunc: chainColorFunc, opacity };
+  }
+  return { color: colorName, opacity };   // 3Dmol reads this as a LITERAL colour
+}
+```
+
+3Dmol treats `style.color` as a literal colour value and reads the scheme name
+from `style.colorscheme`. A scheme name in `color` misses the `htmlColors`
+lookup and falls back to `0x000000`.
+
+Measured against the real 3Dmol 2.4.2 colour engine, **56 of 77
+mode × representation combinations rendered black**: "Secondary structure",
+"Element", "By residue", "Hydrophobicity", "B-factor", "pLDDT",
+"Conservation" and "Uniform" were all black, and "Spectrum" showed the
+default element colour instead of a spectrum. The guided tours use these
+schemes, so the tours were showing black structures.
+
+Two more defects rode along:
+
+- **"By domain" was aliased to the chain colour function**, so it looked
+  exactly like "By chain" while the adenylate kinase tour told the user they
+  were seeing a grey CORE, a blue NMP domain and a red LID domain.
+- **The pLDDT and conservation buttons stamped a cartoon style over the
+  model**, so they did nothing in surface or stick mode and were undone by the
+  next style change.
+
+The fix routes each scheme to the field 3Dmol actually understands, moves the
+colour maths into `src/colors.js` where it is unit-testable without a DOM, and
+reproduces the gradients the app's own annotation key prints — 3Dmol's
+`sinebow` and `rwb` gradients run in the *opposite* direction to the
+documented ones, and 3Dmol 2.4.2 ships `ssColors.PyMol` as `undefined`, so
+`ssPyMol` would have silently fallen through to the atom colour.
+
+Verified in a real browser with 4AKE loaded: all 11 dropdown modes produce
+non-black colours, and a canvas pixel census shows ~56,800 coloured pixels and
+**0 black pixels** in every mode. Tests went from 198 to 225 assertions.
+
+**The lesson for the next audit:** the colour pipeline was the single most
+user-visible surface in the application, it was exercised by every guided
+tour, and neither the lint baseline nor the existing test suite noticed.
+Static analysis cannot catch an API-field mix-up. Rendering assertions —
+checking what colour the pixels actually come out — can, and should have been
+part of this audit's scope from the start.
+
+---
+
+## 11. Verification
 
 Everything in this document was checked, not assumed.
 
 | Check | Method | Result |
 |---|---|---|
 | Syntax of every JS file | `npm run check` (`node --check` × 8) | pass |
-| Unit + behavioural suites | `npm test` | **130 passed, 0 failed** (69 module + 55 analysis + 6 network) |
+| Unit + behavioural suites | `npm test` | **225 passed, 0 failed** (69 analysis + 81 colour + 69 bio + 6 network) |
 | Pocket-function equivalence | Old `app.js` vs `src/pockets.js` on real 1M17 (2,511 atoms) | 0 mismatches over 1,848 probes |
 | Drug-site recall preserved | Enclosure fraction at the erlotinib site, 1M17 | 121/144 above the 0.75 threshold |
 | Off-site specificity preserved | Off-drug probe points, 1M17 | 3/8 above threshold (rejected as before) |
