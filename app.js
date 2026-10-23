@@ -2956,13 +2956,14 @@
       return;
     }
     const ca = atoms.find((a) => a.atom === "CA") || atoms[0];
-    // Packing density: count DISTINCT neighbouring residues whose Cβ sits within
-    // 8 A of this residue's Cα. Measuring CA-to-CA (not CA-to-any-atom) keeps the
-    // metric independent of side-chain length and matches the conventional
-    // definition, so large residues are not over-counted.
+    // Packing density: count DISTINCT neighbouring residues whose Cα sits within
+    // 8 A of this residue's Cα. This is the conventional CA-to-CA definition.
+    // NB: 3Dmol ignores the `atom` filter when it is combined with `not`, so
+    // the CA filter is applied in JS rather than in the selector.
     const neighbours = new Set();
-    const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) }, atom: "CA" });
+    const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) } });
     for (const a of all) {
+      if (a.atom !== "CA") continue;
       const d = computeDistance(ca, a);
       if (d <= 8) neighbours.add(`${a.chain}:${a.resi}`);
     }
