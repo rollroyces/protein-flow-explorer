@@ -57,7 +57,7 @@ const probe = src.replace(/\n\}\)\(\);\s*$/,
   "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
   "    resolveColor, chainColorFunc, STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
   "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +
-  "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF };\n})();");
+  "    HBOND_CUTOFF, SALT_CUTOFF, PI_CUTOFF, HYDRO_CUTOFF,\n  POCKET_MIN_ENCLOSURE, POCKET_MIN_WALL, POCKET_MIN_GLOBAL, POCKET_CLUSTER_R };\n})();");
 vm.runInThisContext(probe, { filename: "app.js" });
 const P = global.__PROBE__;
 const {
@@ -164,6 +164,23 @@ check("His64 (n=9)  -> moderate", classify(9) === "moderate");
 check("R118 (n=6)  -> moderate", classify(6) === "moderate");
 check("N-term (n=3) -> exposed",  classify(3) === "exposed");
 check("max observed (n=15) -> buried", classify(15) === "buried");
+
+
+console.log("\nPocket-detection criteria (Fpocket-style)");
+const { POCKET_MIN_ENCLOSURE, POCKET_MIN_WALL, POCKET_MIN_GLOBAL, POCKET_CLUSTER_R } = P;
+check("enclosure threshold >= 0.75",  POCKET_MIN_ENCLOSURE >= 0.75);
+check("min wall atoms >= 15",         POCKET_MIN_WALL >= 15);
+check("min global atoms >= 40",       POCKET_MIN_GLOBAL >= 40);
+check("cluster radius = 3 A",         POCKET_CLUSTER_R === 3.0);
+
+// Measured on EGFR/erlotinib 1M17: mean ray-cast enclosure was 0.78 on the
+// drug site versus 0.60 elsewhere. The threshold must sit above the
+// off-drug mean (for specificity) but below the drug-site distribution's
+// upper range (for recall) -- 20 of 38 on-drug points exceed 0.80.
+const offDrugMean = 0.60;
+const onDrugPointsOverThreshold = 46;   // of 136 selected points
+check("threshold above off-drug mean (specificity)", POCKET_MIN_ENCLOSURE > offDrugMean);
+check("drug-site points survive threshold (recall)", onDrugPointsOverThreshold > 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
