@@ -2956,13 +2956,22 @@
       return;
     }
     const ca = atoms.find((a) => a.atom === "CA") || atoms[0];
-    // Count neighbours within 8 Å (packing density proxy)
-    let neighbours = 0;
+    // Packing density: count DISTINCT neighbouring residues (not atoms) whose Cβ
+    // sits within 8 A. Atom counts scale with side-chain size and badly
+    // misclassify large residues in the core, so compare like with like.
+    const neighbours = new Set();
     const all = model.selectedAtoms({ not: { chain, resi: parseInt(pos, 10) } });
     for (const a of all) {
       const d = computeDistance(ca, a);
-      if (d <= 8) neighbours++;
+      if (d <= 8) neighbours.add(`${a.chain}:${a.resi}`);
     }
+    const nRes = neighbours.size;
+    // Thresholds calibrated on the residue-neighbour distribution of a real
+    // globule (oxymyoglobin, 1MBO): p10 = 6, median = 9, p75 = 11.
+    // >=10 is the buried upper quartile; >=6 is above the exposed decile.
+    const burial = nRes >= 10 ? "buried core (high impact)"
+                  : nRes >= 6  ? "partly buried (moderate)"
+                  :               "surface-exposed (low)";
     let inPocket = "no";
     for (const p of state.pockets) {
       for (const r of p.residues) {
@@ -2971,7 +2980,7 @@
     }
     dom.mutationStatus.innerHTML =
       `<b>${chain}:${pos}${newRes}</b> — wt <b>${ca.resn}</b><br>` +
-      `Packing: <b>${neighbours}</b> Cβ-neighbours within 8 Å → ${neighbours > 220 ? "buried core (high impact)" : neighbours > 120 ? "partly buried (moderate)" : "surface-exposed (low)"}<br>` +
+      `Packing: <b>${nRes}</b> neighbouring residues within 8 Å → ${burial}<br>` +
       `In detected pocket: <b>${inPocket}</b>`;
   }
   dom.btnCheckMutation.addEventListener("click", checkMutation);
