@@ -221,24 +221,25 @@ const PROTEINS = [
   // ---------- Cart cell (chondrocyte) proteins ----------
   {
     id: "col2a1",
-    name: "Collagen II · C-propeptide",
-    pdbIds: ["1BMP"],
-    stateLabels: ["Triple helix"],
-    // 1BMP's PDB title says "bone morphogenetic protein 7" and its UniProt
-    // cross-reference points at BMP-7, but the structure is the type II
-    // collagen C-propeptide trimer -- the long-standing legacy annotation
-    // that mislabelled it. State the accession this entry is actually about.
-    uniprot: "P02452",
+    name: "Collagen II · Gly-X-Y helix",
+    pdbIds: ["6HG7"],
+    stateLabels: ["Gly-Pro-Hyp triple helix"],
+    // 6HG7 is a collagen II fragment (UniProt P02458, COL2A1) as a
+    // Gly-Pro-Hyp triple helix at 1.0 A, in three chains. The entry
+    // previously pointed at 1BMP, which is bone morphogenetic protein 7 -
+    // its PDB title and its UniProt cross-reference both say so - and is not
+    // collagen at all.
+    uniprot: "P02458",
     summary: "Hallmark of cartilage — most abundant protein in chondrocytes",
     description:
-      "Type II collagen (COL2A1) is the defining matrix protein of hyaline cartilage, secreted by chondrocytes. It forms a triple-helical structure with repeating Gly-X-Y motifs, where X is often Pro and Y is often Hyp (hydroxyproline). The C-propeptide trimerizes first and nucleates the triple helix. Mutations cause spondyloepiphyseal dysplasia and Stickler syndrome. The 1BMP structure shows the C-propeptide trimer that initiates fibril assembly.",
+      "Type II collagen (COL2A1) is the defining matrix protein of hyaline cartilage, secreted by chondrocytes. It forms a triple-helical structure with repeating Gly-X-Y motifs, where X is often Pro and Y is often Hyp (hydroxyproline). The 6HG7 structure shows the C-terminal region of collagen II as a Gly-Pro-Hyp triple helix at 1.0 Å resolution, in three chains, with the repeat running on along the helix. Mutations cause spondyloepiphyseal dysplasia and Stickler syndrome.",
     category: "domains",
     color: "#06b6d4",
     highlights: {
       residues: [
-        { resi: 25, label: "Gly — every 3rd residue (Gly-X-Y repeat)" },
-        { resi: 28, label: "Pro — X position" },
-        { resi: 29, label: "Hyp (hydroxyproline) — Y position" },
+        { resi: 3, label: "Gly — every 3rd residue (Gly-X-Y repeat)" },
+        { resi: 4, label: "Pro — X position" },
+        { resi: 5, label: "Hyp (hydroxyproline) — Y position" },
       ],
     },
   },
