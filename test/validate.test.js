@@ -143,9 +143,13 @@ const CLINVAR = {
   variation_set: [{
     variation_name: "NM_005228.5(EGFR):c.2369C>T (p.Thr790Met)",
     canonical_spdi: "NC_000007.14:55249071:C:T",
+    // ClinVar returns the coordinates as STRINGS, not numbers. The fixture
+    // mirrors the real payload exactly, because a fixture that disagrees with
+    // the API is how a whole feature gets silently broken while the tests
+    // stay green.
     variation_loc: [
-      { assembly_name: "GRCh38", chr: "7", start: 55249072, stop: 55249072 },
-      { assembly_name: "GRCh37", chr: "7", start: 55259515, stop: 55259515 },
+      { assembly_name: "GRCh38", chr: "7", start: "55249072", stop: "55249072", ref: "", alt: "" },
+      { assembly_name: "GRCh37", chr: "7", start: "55259515", stop: "55259515", ref: "", alt: "" },
     ],
   }],
   germline_classification: {
@@ -259,7 +263,23 @@ check("a record with a non-object variation_set[0] is rejected",
     r.variation_set = ["nope"];
     return r;
   })()).ok);
-check("a record with a non-string variation_loc is rejected",
+// The coordinate type: ClinVar sends strings, but a number is equally valid.
+check("a string coordinate is accepted (the real API's shape)",
+  V.validateClinVarRecord(CLINVAR).ok);
+check("a numeric coordinate is accepted too",
+  V.validateClinVarRecord((() => {
+    const r = clone(CLINVAR);
+    r.variation_set[0].variation_loc[0].start = 55249072;
+    r.variation_set[0].variation_loc[0].stop = 55249072;
+    return r;
+  })()).ok);
+check("a coordinate that is not a coordinate is rejected",
+  !V.validateClinVarRecord((() => {
+    const r = clone(CLINVAR);
+    r.variation_set[0].variation_loc[0].start = "not-a-position";
+    return r;
+  })()).ok);
+check("a non-string variation_loc is rejected",
   !V.validateClinVarRecord((() => {
     const r = clone(CLINVAR);
     r.variation_set[0].variation_loc = "chr7";

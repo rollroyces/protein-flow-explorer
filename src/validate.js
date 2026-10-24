@@ -102,6 +102,18 @@
    * @param {*} value
    * @returns {boolean}
    */
+  /**
+   * A genomic coordinate: a number, or a string of digits.
+   *
+   * ClinVar's ESummary returns `variation_loc[].start` and `.stop` as
+   * strings ("55181378"), so a strict number check rejects real records.
+   */
+  function isCoordinate(value) {
+    if (typeof value === "number") return Number.isFinite(value);
+    if (typeof value === "string") return /^\d+$/.test(value.trim());
+    return false;
+  }
+
   function isPlainObject(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
   }
@@ -396,9 +408,17 @@
           return fail(CODES.INVALID_SHAPE,
             `${label} has a variation_set[0].variation_loc chr that is not a string or number.`);
         }
-        if (loc.start !== undefined && typeof loc.start !== "number") {
+        // ClinVar returns the coordinates as STRINGS ("55181378"), not
+        // numbers. Requiring a number rejected every real record, which
+        // silently emptied the variant map. Accept either, and reject
+        // anything that is not an integer.
+        if (loc.start !== undefined && !isCoordinate(loc.start)) {
           return fail(CODES.INVALID_SHAPE,
-            `${label} has a variation_set[0].variation_loc start that is not a number.`);
+            `${label} has a variation_set[0].variation_loc start that is not a coordinate.`);
+        }
+        if (loc.stop !== undefined && !isCoordinate(loc.stop)) {
+          return fail(CODES.INVALID_SHAPE,
+            `${label} has a variation_set[0].variation_loc stop that is not a coordinate.`);
         }
       }
     }

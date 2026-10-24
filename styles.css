@@ -1303,6 +1303,8 @@ a:hover { text-decoration: underline; }
 .dot-conflict { background: #8b5cf6; }
 .dot-drugresp { background: #a78bfa; }
 .dot-risk { background: #ec4899; }
+.dot-protective { background: #2dd4bf; }
+.dot-unknown { background: #cccccc; }
 
 /* Variant table: one row per protein change placed on the structure */
 .variant-table {

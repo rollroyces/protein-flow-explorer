@@ -36,7 +36,8 @@
           buildUniprotMap, mergeByChange } = PFE.variants;
   const { validatePdbId, validateGeneSymbol, validateUniprotAccession,
           validateClinVarRecord, validateGnomadResponse } = PFE.validate;
-  const { parseMedianExpression, groupByCompartment, summarizeExpression } = PFE.expression;
+  const { parseMedianExpression, groupByCompartment, summarizeExpression,
+          logExpression, EXPRESSION_TPM_MAX } = PFE.expression;
 
   // ====== GLOBAL STATE ======
   const state = {
@@ -581,6 +582,15 @@
       showCustomError(checked.error);
       return;
     }
+    if (/^pdb_/i.test(checked.value)) {
+      // The extended id format ("pdb_00001abc") is real and is arriving in
+      // the archive, but files.rcsb.org does not serve it yet, so accepting
+      // it here would only produce a 404.
+      showCustomError(
+        `"${checked.value}" is an extended PDB ID, which the download service does not ` +
+        `serve yet. Use the 4-character ID, e.g. 4HHB.`);
+      return;
+    }
     const pdbId = checked.value;
     const id = `custom-${pdbId}`;
     if (PROTEINS.some((p) => p.id === id)) {
@@ -832,6 +842,11 @@
     state.currentProtein = protein;
     state.currentPdbIndex = 0;
     state._chainOrder = []; // reset chain->colour mapping for the new structure
+    // Tissue expression is per-gene: leaving the previous gene's data on
+    // screen over a different structure would be a different structure's
+    // numbers presented as this one's.
+    state.expression = null;
+    if (dom.expressionStatus) dom.expressionStatus.textContent = "No expression loaded.";
 
     dom.currentProteinName.textContent = protein.name;
     updateStateBadge(0);
@@ -2323,7 +2338,7 @@
       pathogenic: "dot-path", likely_pathogenic: "dot-likpath", vus: "dot-vus",
       conflicting: "dot-conflict", likely_benign: "dot-likben", benign: "dot-ben",
       drug_response: "dot-drugresp", risk_factor: "dot-risk",
-      protective: "dot-ben", unknown: "dot-vus",
+      protective: "dot-protective", unknown: "dot-unknown",
     };
     const order = ["pathogenic", "likely_pathogenic", "drug_response", "risk_factor",
                    "conflicting", "vus", "likely_benign", "benign", "protective"];
@@ -2494,7 +2509,12 @@
     }
     const sum = ex.summary;
     const groups = groupByCompartment(ex.rows);
-    const maxTpm = Math.max(sum.maxTpm || 0, 1);
+    // The bar length, the fill colour and the legend must all speak about
+    // the same scale. The module colours on an absolute log scale, so the
+    // bar has to be log too -- a linear bar against the gene's own maximum
+    // carries no information when one tissue is a hundred times the rest.
+    const logCeiling = logExpression(EXPRESSION_TPM_MAX);
+    const barWidth = (t) => Math.max(2, Math.min(100, (100 * t.log) / logCeiling));
 
     const rowsHtml = groups.map((g) => `
       <div class="expr-group">
@@ -2502,7 +2522,7 @@
         ${g.tissues.map((t) => `
           <div class="expr-tissue${t.detected ? "" : " expr-undetected"}">
             <span class="expr-tissue-name">${escapeHtml(t.label)}</span>
-            <span class="expr-bar"><span class="expr-bar-fill" style="width:${Math.max(2, Math.round((100 * t.tpm) / maxTpm))}%;background:#${t.color.toString(16).padStart(6, "0")}"></span></span>
+            <span class="expr-bar"><span class="expr-bar-fill" style="width:${barWidth(t).toFixed(1)}%;background:#${t.color.toString(16).padStart(6, "0")}"></span></span>
             <span class="expr-tpm">${t.tpm >= 10 ? t.tpm.toFixed(0) : t.tpm.toFixed(2)}</span>
           </div>`).join("")}
       </div>`).join("");
