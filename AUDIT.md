@@ -712,6 +712,25 @@ Static analysis cannot catch an API-field mix-up. Rendering assertions —
 checking what colour the pixels actually come out — can, and should have been
 part of this audit's scope from the start.
 
+### A regression the tests pinned in place
+
+An independent review of the tissue-expression work found that adding payload
+validation had **broken the ClinVar variant map entirely**. The new validator
+required `variation_loc[].start` to be a JavaScript number; ClinVar returns
+it as a **string**. Replaying the app's own loop against a live batch, 0 of 40
+EGFR records survived, and the panel read "0 protein changes".
+
+The instructive part is what the test suite did about it: nothing. The
+fixture was hand-written with a numeric `start`, so it encoded the same
+wrong assumption as the code. Mutating the fixture to the API's real string
+shape made the tests fail — the suite could not catch the bug because the
+suite *was* the bug.
+
+The rule that follows is blunt: **a fixture that disagrees with the API is
+worse than no fixture**, because it converts a defect into an enforced
+invariant. Fixtures for third-party payloads must be captured from the live
+response, character for character, including whether a field is a string.
+
 ### Two more defects found while building the variant panel
 
 Both were found by using the code, not by reading it.
