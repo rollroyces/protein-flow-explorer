@@ -53,7 +53,7 @@ vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8")
 
 // The extracted pure modules publish themselves on the PFE namespace and must
 // be loaded before app.js, which destructures them.
-for (const m of ["seq", "geometry", "pockets", "colors", "variants"]) {
+for (const m of ["seq", "geometry", "pockets", "colors", "variants", "expression", "validate", "annotations"]) {
   vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", `${m}.js`), "utf8"),
     { filename: `src/${m}.js` });
 }
@@ -63,7 +63,7 @@ const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration,\n" +
   "    isAbort, currentNetGeneration: () => netGeneration,\n" +
   "    midPoint, computeDistance, computeAngle,\n" +
-  "    computeDihedral, cross, dot, progressiveMsa, conservationScores, nwAlign,\n" +
+  "    computeDihedral, progressiveMsa, conservationScores, nwAlign,\n" +
   "    resolveColor, chainColorFunc, domainColorFunc, state,\n" +
   "    STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
   "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +

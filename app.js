@@ -25,15 +25,18 @@
   // Destructuring keeps every existing call site unchanged.
   const { parseSequenceFromPDB, parseFastaSequences, nwAlign, progressiveMsa,
           conservationScores, buildResidueIndex, AA3TO1 } = PFE.seq;
-  const { midPoint, cross, dot, computeDistance, computeAngle, computeDihedral,
+  const { midPoint, computeDistance, computeAngle, computeDihedral,
           computePerResidueRmsd } = PFE.geometry;
-  const { buildAtomHash, countAtomsNear, rayHits, enclosureFraction } = PFE.pockets;
+  const { buildAtomHash, countAtomsNear, enclosureFraction } = PFE.pockets;
   const { STRUCT_CHAIN_PALETTE, ssColor, spectrumColor, bfactorColor,
           hydrophobicityColor, plddtColor, conservationColor } = PFE.colors;
-  const { SIGNIFICANCE_COLORS, SIGNIFICANCE_ORDER, parseProteinChange, parseSpdi,
+  const { SIGNIFICANCE_COLORS, parseProteinChange,
           extractProteinChange, gnomadVariantId, classifySignificance,
           classifyImpactTier, classifyOncogenicity, significanceRank, rarityLabel,
           buildUniprotMap, mergeByChange } = PFE.variants;
+  const { validatePdbId, validateGeneSymbol, validateUniprotAccession,
+          validateClinVarRecord, validateGnomadResponse } = PFE.validate;
+  const { parseMedianExpression, groupByCompartment, summarizeExpression } = PFE.expression;
 
   // ====== GLOBAL STATE ======
   const state = {
@@ -91,6 +94,7 @@
     conservationJob: null,   // Promise tracking in-flight fetch
     variants: [],            // [{resi, chain, mutation, significance, color}]
     variantByResidue: new Map(),   // "chain:resi" -> colour, for the variant scheme
+    expression: null,              // GTEx tissue expression for the loaded gene
     variantRateLimited: false,     // gnomAD refused some frequency lookups
     variantLookupErrors: 0,        // gnomAD lookups that failed outright
     _uniprotInfo: null,      // cached {accession, gene, sequence} for the loaded structure
@@ -208,6 +212,9 @@
     conservationStatus: $("conservation-status"),
     btnFetchVariants: $("btn-fetch-variants"),
     btnClearVariants: $("btn-clear-variants"),
+    btnFetchExpression: $("btn-fetch-expression"),
+    btnClearExpression: $("btn-clear-expression"),
+    expressionStatus: $("expression-status"),
     variantsStatus: $("variants-status"),
     btnDetectPockets: $("btn-detect-pockets"),
     btnAnalyzeContacts: $("btn-analyze-contacts"),
@@ -375,17 +382,7 @@
     throw lastErr || new Error("request failed");
   }
 
-  /** Convenience: net() plus a JSON parse, with the same guarantees. */
-  async function netJson(url, opts, gen) {
-    const res = await net(url, opts, gen);
-    return res.json();
-  }
 
-  /** Convenience: net() plus a text parse. */
-  async function netText(url, opts, gen) {
-    const res = await net(url, opts, gen);
-    return res.text();
-  }
 
   // ====== URL STATE ENCODE / DECODE ======
   function encodeState() {
@@ -578,11 +575,13 @@
   }
 
   async function loadCustomByPdbId(pdbIdRaw) {
-    const pdbId = String(pdbIdRaw || "").trim().toUpperCase();
-    if (!/^[0-9][A-Z0-9]{3}$/.test(pdbId)) {
-      showCustomError(`Invalid PDB ID "${pdbIdRaw}". Use 4 characters, e.g. 4HHB.`);
+    // Validate before the value goes anywhere near a URL.
+    const checked = validatePdbId(pdbIdRaw);
+    if (!checked.ok) {
+      showCustomError(checked.error);
       return;
     }
+    const pdbId = checked.value;
     const id = `custom-${pdbId}`;
     if (PROTEINS.some((p) => p.id === id)) {
       hideLoading();
@@ -720,7 +719,9 @@
 
   // ====== UNIPROT / GENE LOOKUP ======
   async function loadByGeneOrUniprot(queryRaw) {
-    const query = String(queryRaw || "").trim();
+    // Upper-case up front: gene symbols and accessions are case-insensitive
+    // in practice, and the validators are deliberately strict about shape.
+    const query = String(queryRaw || "").trim().toUpperCase();
     if (!query) {
       showCustomError("Type a gene name (e.g. TP53) or UniProt accession (e.g. P04637).");
       return;
@@ -731,14 +732,18 @@
     try {
       let accession = null;
 
-      // Detect input type
-      const isUniprotAcc = /^[A-Z][A-Z0-9]{5,9}$/.test(query);
+      // Detect the input type by trying both, rather than by guessing from a
+      // shape: a gene symbol and an accession are both "letters and digits",
+      // and the previous guess sent a mixed-case symbol like C11orf87 down
+      // the accession branch.
+      const asAccession = validateUniprotAccession(query);
+      const asGene = validateGeneSymbol(query);
 
-      if (isUniprotAcc) {
-        accession = query;
-      } else {
+      if (asAccession.ok) {
+        accession = asAccession.value;
+      } else if (asGene.ok) {
         // Treat as gene name — query UniProt
-        const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${encodeURIComponent(query)}+AND+organism_id:9606&format=json&size=1&fields=accession,gene_names,protein_name`;
+        const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${encodeURIComponent(asGene.value)}+AND+organism_id:9606&format=json&size=1&fields=accession,gene_names,protein_name`;
         const r = await net(url);
         if (!r.ok) throw new Error(`UniProt search returned ${r.status}`);
         const j = await r.json();
@@ -749,6 +754,10 @@
           return;
         }
         accession = hit.primaryAccession;
+      } else {
+        hideLoading();
+        showCustomError(`${asGene.error} Give a UniProt accession instead, e.g. P04637.`);
+        return;
       }
 
       // Try to find PDB cross-references
@@ -1795,7 +1804,7 @@
 
         dom.conservationStatus.textContent = "Fetching homologs…";
         // Homologs via UniProt search: by organism (human) and protein name keywords
-        const protName = state.currentProtein.name.split(/[·•:()\-]/)[0].trim();
+        const protName = state.currentProtein.name.split(/[·•:()-]/)[0].trim();
         const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
         const sr = await net(searchUrl);
         if (!sr.ok) throw new Error("Homolog search failed");
@@ -2048,18 +2057,20 @@
       // The body has to be read even on a non-2xx: gnomAD reports its rate
       // limit with HTTP 400 and the message "Query rate limit exceeded", and
       // that message is the only way to tell "we were throttled" apart from
-      // "this variant is not in gnomAD".
+      // "this variant is not in gnomAD". The validator makes that distinction
+      // with a stable code rather than a message pattern.
       let j = null;
       try { j = await r.json(); } catch (e) { /* not json */ }
-      const message = j && j.errors && j.errors.length ? String(j.errors[0].message || "") : "";
-      if (/rate limit|too many/i.test(message)) return { rateLimited: true };
-      if (!r.ok) return { error: true };
-      if (j.errors && j.errors.length) return { absent: true };   // "Variant not found"
-      const v = j.data && j.data.variant;
-      if (!v) return { absent: true };
-      if (v.genome && typeof v.genome.af === "number") return { af: v.genome.af, source: "genome" };
-      if (v.exome && typeof v.exome.af === "number") return { af: v.exome.af, source: "exome" };
-      return { absent: true };
+      const check = validateGnomadResponse(j);
+      if (check.ok) {
+        const v = j.data.variant;
+        if (v.genome && typeof v.genome.af === "number") return { af: v.genome.af, source: "genome" };
+        if (v.exome && typeof v.exome.af === "number") return { af: v.exome.af, source: "exome" };
+        return { absent: true };
+      }
+      if (check.code === "rate_limited") return { rateLimited: true };
+      if (check.code === "not_found") return { absent: true };
+      return { error: true };
     } catch (e) {
       const msg = e && e.message ? e.message : "";
       if (/429|rate limit/i.test(msg)) return { rateLimited: true };
@@ -2202,7 +2213,15 @@
             const sj = await sr.json();
             const res = sj.result || {};
             for (const uid of res.uids || []) {
-              if (res[uid]) records.push(parseClinVarRecord(res[uid]));
+              if (!res[uid]) continue;
+              // A record missing the fields the app reads would otherwise
+              // become an undefined value deep inside the renderer.
+              const check = validateClinVarRecord(res[uid]);
+              if (!check.ok) {
+                console.warn(`ClinVar record ${uid} skipped: ${check.error}`);
+                continue;
+              }
+              records.push(parseClinVarRecord(res[uid]));
             }
           }
         } catch (e) {
@@ -2407,6 +2426,107 @@
     }
     applyAllStyles();
     state.viewer.render();
+  });
+
+  // ----- Tissue expression (GTEx) -----
+  //
+  // The third pillar of a biomarker claim. The variant panel says the change
+  // is significant and rare; this says the protein it changes is actually
+  // made in the tissue where the disease happens. GTEx reports median
+  // transcripts per million across 54 human tissues.
+  //
+  // The portal is CORS-open, so this runs from the browser like every other
+  // data source in the app.
+
+  const GTEX_API = "https://gtexportal.org/api/v2";
+
+  async function fetchExpression() {
+    if (!state.currentProtein) {
+      showCustomError("Load a protein first.");
+      return;
+    }
+    dom.btnFetchExpression.disabled = true;
+    dom.expressionStatus.textContent = "Looking up the gene…";
+    try {
+      // The gene symbol comes from the structure's UniProt accession, so this
+      // works for every curated entry and for custom loads too.
+      const up = await fetchUniProtInfo(state.meta && state.meta.uniprot);
+      if (!up || !up.gene) {
+        dom.expressionStatus.textContent =
+          "No UniProt accession for this structure, so the gene symbol could not be determined.";
+        return;
+      }
+      const gene = up.gene;
+
+      dom.expressionStatus.textContent = `Looking up ${gene} in GTEx…`;
+      const refRes = await net(`${GTEX_API}/reference/gene?geneId=${encodeURIComponent(gene)}`);
+      if (!refRes.ok) throw new Error(`GTEx gene lookup returned ${refRes.status}`);
+      const refJson = await refRes.json();
+      const ref = (refJson.data || [])[0];
+      if (!ref || !ref.gencodeId) throw new Error(`GTEx has no entry for ${gene}.`);
+
+      dom.expressionStatus.textContent = `Fetching median expression for ${gene}…`;
+      const exprRes = await net(
+        `${GTEX_API}/expression/medianGeneExpression` +
+        `?gencodeId=${encodeURIComponent(ref.gencodeId)}&datasetId=gtex_v8`);
+      if (!exprRes.ok) throw new Error(`GTEx expression lookup returned ${exprRes.status}`);
+      const rows = parseMedianExpression(await exprRes.json());
+      if (!rows.length) throw new Error(`GTEx returned no expression data for ${gene}.`);
+
+      state.expression = { gene, rows, summary: summarizeExpression(rows) };
+      renderExpressionPanel();
+      showToast(`Loaded GTEx tissue expression for ${gene}`, "success");
+    } catch (err) {
+      state.expression = null;
+      dom.expressionStatus.textContent = `GTEx fetch failed: ${err.message}`;
+      showCustomError(`GTEx fetch failed: ${err.message}`);
+    } finally {
+      dom.btnFetchExpression.disabled = false;
+    }
+  }
+
+  /** Render the specificity verdict and the tissues, grouped by compartment. */
+  function renderExpressionPanel() {
+    const ex = state.expression;
+    if (!ex) {
+      dom.expressionStatus.textContent = "No expression loaded.";
+      return;
+    }
+    const sum = ex.summary;
+    const groups = groupByCompartment(ex.rows);
+    const maxTpm = Math.max(sum.maxTpm || 0, 1);
+
+    const rowsHtml = groups.map((g) => `
+      <div class="expr-group">
+        <div class="expr-group-head">${escapeHtml(g.label)}</div>
+        ${g.tissues.map((t) => `
+          <div class="expr-tissue${t.detected ? "" : " expr-undetected"}">
+            <span class="expr-tissue-name">${escapeHtml(t.label)}</span>
+            <span class="expr-bar"><span class="expr-bar-fill" style="width:${Math.max(2, Math.round((100 * t.tpm) / maxTpm))}%;background:#${t.color.toString(16).padStart(6, "0")}"></span></span>
+            <span class="expr-tpm">${t.tpm >= 10 ? t.tpm.toFixed(0) : t.tpm.toFixed(2)}</span>
+          </div>`).join("")}
+      </div>`).join("");
+
+    dom.expressionStatus.innerHTML =
+      `<b>${escapeHtml(ex.gene)}</b> · ${escapeHtml(sum.specificityLabel)}` +
+      ` · ${sum.detectedCount} of ${sum.tissueCount} tissues detected` +
+      `<br><span class="muted small">` +
+      `Peak: ${escapeHtml(sum.maxTissueLabel)} at ${sum.maxTpm.toFixed(1)} TPM` +
+      (sum.foldVsMedian ? ` (${sum.foldVsMedian.toFixed(1)}× the median)` : "") +
+      (sum.dominanceRatio && sum.dominanceRatio !== Infinity
+        ? ` · ${sum.dominanceRatio.toFixed(1)}× the runner-up` : "") +
+      ` · median ${sum.medianTpm.toFixed(2)} TPM · mean ${sum.meanTpm.toFixed(1)} TPM` +
+      `</span>` +
+      `<div class="expr-legend"><span class="muted small">` +
+      `low <span class="expr-scale"></span> high (log scale, 0–1000 TPM)` +
+      `</span></div>` +
+      rowsHtml;
+  }
+
+  dom.btnFetchExpression.addEventListener("click", fetchExpression);
+  dom.btnClearExpression.addEventListener("click", () => {
+    state.expression = null;
+    dom.expressionStatus.textContent = "No expression loaded.";
   });
 
   // ----- Pocket detection (alpha-sphere grid scan) -----
@@ -2645,9 +2765,6 @@
     try { return model.selectedAtoms(sel) || []; } catch (e) { return []; }
   }
 
-  function clusterRadius(p) {
-    return Math.cbrt(p.volume * 0.75 / Math.PI) + 4;
-  }
   dom.btnDetectPockets.addEventListener("click", detectPockets);
 
   // ----- Ligand contacts -----
@@ -2685,7 +2802,7 @@
 
       const CUTOFF = 4.0; // Å
       const contacts = [];
-      for (const [lname, lg] of Object.entries(ligandGroups)) {
+      for (const [, lg] of Object.entries(ligandGroups)) {
         const contactSet = new Map(); // "chain:resi" -> minDistance
         for (const la of lg.atoms) {
           for (const a of allAtoms) {
@@ -3294,7 +3411,6 @@
   }
 
   // Physicochemical descriptors computed from the loaded model.
-  const LIG_ELEMENTS = new Set(["C", "N", "O", "S", "P", "F", "Cl", "Br", "I", "H"]);
   function computeLigandProperties(compId) {
     const model = state.models[state.currentPdbIndex];
     if (!model) return null;
@@ -3340,7 +3456,6 @@
     }
     const ligName = (l.name || "").toLowerCase();
     const isNucleic = /\b(adenosine|guanosine|cytidine|uridine|thymidine|dna|rna|phosphate|cytidyl)\b/.test(ligName);
-    const isIon = l.compId.length <= 3 && /^(ZN|FE|MG|CA|NA|K|MN|CL|CU|CO|NI|CD|HG)/.test(l.compId);
     dom.ligandPropStatus.textContent = isIonic(l) ? "Ion / cofactor" : isNucleic ? "Nucleotide / nucleic acid" : "Small-molecule ligand";
     const rows = [
       ["Atoms (heavy)", props.heavy],
@@ -3663,59 +3778,12 @@
   // and attach provenance, an explicit annotation key, and honest uncertainty
   // at each level.
 
-  const ANNOTATIONS = [
-    {
-      id: "chain", name: "By chain", quantity: "polymer entity / chain",
-      grad: "linear-gradient(90deg,#2f7ed8,#ef553b,#00a878,#f2b705,#9b5de5)",
-      use: "Locating a domain or subunit across a complex.",
-    },
-    {
-      id: "byDomain", name: "By domain", quantity: "annotated structural domain",
-      grad: "linear-gradient(90deg,#2f7ed8,#9aa0a6,#cc1f1f)",
-      use: "Separating the parts of a multi-domain protein that move independently.",
-      needs: "domains",
-    },
-    {
-      id: "ss", name: "Secondary structure", quantity: "helix / strand / coil (HELIX + SHEET records)",
-      grad: "linear-gradient(90deg,#ef5350,#f5c542,#9aa0a6)",
-      use: "Reading fold architecture; finding helices that pack into the core.",
-    },
-    {
-      id: "spectrum", name: "Spectrum (N→C)", quantity: "residue index along the chain",
-      grad: "linear-gradient(90deg,#0053d6,#00b4d8,#f5c542,#cc1f1f)",
-      use: "Following a sequence walk; spotting a domain boundary.",
-    },
-    {
-      id: "bFactor", name: "B-factor", quantity: "atomic displacement (Å²)",
-      grad: "linear-gradient(90deg,#2f7ed8,#00a878,#f5c542,#cc1f1f)",
-      use: "Experimental flexibility in the crystal. High = disordered or mobile.",
-      needs: "crystal",
-    },
-    {
-      id: "pLDDT", name: "pLDDT (AlphaFold)", quantity: "per-residue prediction confidence (0–100)",
-      grad: "linear-gradient(90deg,#ff7d45,#ffdb13,#65cbf3,#0053d6)",
-      use: "Trust in an AlphaFold model. <50 is usually a disordered tail.",
-      needs: "alphafold",
-    },
-    {
-      id: "conservation", name: "Conservation", quantity: "MSA column identity across homologs",
-      grad: "linear-gradient(90deg,#5b8def,#f5c542,#cc1f1f)",
-      use: "Finding functional sites — the core is invariant, the surface is not.",
-      needs: "conservation",
-    },
-    {
-      id: "variant", name: "Variant significance", quantity: "ClinVar clinical significance",
-      grad: "linear-gradient(90deg,#b91c1c,#f97316,#fbbf24,#84cc16,#22c55e)",
-      use: "Where the known disease variants sit, and how severe they are.",
-      needs: "variants",
-    },
-    {
-      id: "hydrophobicity", name: "Hydrophobicity", quantity: "Kyte–Doolittle side-chain score",
-      grad: "linear-gradient(90deg,#0053d6,#f5c542,#cc1f1f)",
-      use: "Reading a surface for a ligand-facing hydrophobic face.",
-    },
-  ];
-
+  // The annotation key lives in src/annotations.js, where it is cross-checked
+  // against the palettes the app actually renders. It used to live here, and
+  // it drifted: the key advertised five of the ten colours the variant
+  // scheme can produce, so a drug-response sphere (EGFR T790M, L858R) had
+  // no legend entry at all.
+  const ANNOTATIONS = PFE.annotations.ANNOTATIONS;
   function renderPresentation() {
     const m = state.meta;
     const prot = state.currentProtein;
@@ -3779,13 +3847,15 @@
       </div>`).join("");
 
     // ---- annotation key ----
-    const available = {
+    // The five flags the annotation key knows about, named in one place so a
+    // typo cannot silently disable a key entry.
+    const available = PFE.annotations.availability({
       crystal: !!m && /X-RAY|NMR|EM|ELECTRON|CRYO/.test(m.method || ""),
       alphafold: !!isAF,
       conservation: !!state.conservation,
       domains: !!(state.currentProtein && state.currentProtein.domains && state.currentProtein.domains.length),
       variants: !!(state.variants && state.variants.some((v) => v.inStructure)),
-    };
+    });
     dom.annotKey.innerHTML = ANNOTATIONS.map((a) => {
       const ok = !a.needs || available[a.needs];
       return `<div class="annot-row ${ok ? "" : "unavailable"}" data-annot="${escapeHtml(a.id)}">
@@ -3848,7 +3918,6 @@
       </div>`;
 
     // ---- citation ----
-    const year = m && m.released && m.released !== "—" ? m.released.slice(0, 4) : "n.d.";
     dom.citeBlock.textContent = m
       ? `${m.pdbId.toUpperCase()}. Deposited ${m.deposited ? m.deposited.slice(0, 10) : "?"}; released ${m.released ? m.released.slice(0, 10) : "?"}.${up ? ` UniProt ${up}.` : ""} Method ${m.method}${m.resolution !== "—" ? ", " + m.resolution : ""}. Retrieved from RCSB PDB.`
       : "Select a structure to generate a citation.";

@@ -18,7 +18,12 @@ const vm = require("vm");
 const ROOT = path.join(__dirname, "..");
 vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", "colors.js"), "utf8"),
   { filename: "src/colors.js" });
+// The variant significance colours live in their own module, and the
+// annotation key has to agree with them.
+vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", "variants.js"), "utf8"),
+  { filename: "src/variants.js" });
 const C = globalThis.PFE.colors;
+const V = globalThis.PFE.variants;
 
 let pass = 0, fail = 0;
 function check(name, cond, detail = "") {
@@ -129,15 +134,18 @@ check("non-numeric -> grey", C.conservationColor(undefined) === 0xcccccc);
 
 // ------------------------------------- the annotation key must agree
 console.log("\nAnnotation key agreement");
+// The annotation key now lives in src/annotations.js, where it is
+// cross-checked against the palettes the app actually renders. Read it from
+// there rather than scraping app.js, which no longer holds a copy.
 const appSrc = fs.readFileSync(path.join(ROOT, "app.js"), "utf8");
-const annotStart = appSrc.indexOf("const ANNOTATIONS");
-const annotEnd = appSrc.indexOf("];", annotStart);
-const annotBlock = appSrc.slice(annotStart, annotEnd);
+vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", "annotations.js"), "utf8"),
+  { filename: "src/annotations.js" });
+const ANNOT = globalThis.PFE.annotations;
 // Index the gradients by annotation id, not by position, so that reordering
 // the key does not silently invalidate these checks.
 const grads = {};
-for (const m of annotBlock.matchAll(/id:\s*"([^"]+)"[\s\S]{0,400}?grad:\s*"linear-gradient\(90deg,([^)]+)\)"/g)) {
-  grads[m[1]] = m[2].split(",").map((s) => parseInt(s.replace("#", ""), 16));
+for (const entry of ANNOT.ANNOTATIONS) {
+  grads[entry.id] = entry.stops.map((s) => parseInt(s.replace("#", ""), 16));
 }
 check("annotation key has 9 entries", Object.keys(grads).length === 9,
       `(${Object.keys(grads).length})`);
@@ -163,13 +171,20 @@ check("conservation key matches the ramp endpoints",
 check("hydrophobicity key matches the ramp endpoints",
       grads.hydrophobicity[0] === C.HYDROPHOBICITY_STOPS[0] &&
       grads.hydrophobicity[2] === C.HYDROPHOBICITY_STOPS[2]);
-// variant key: the five legend colours the panel prints
-check("variant key matches the legend colours",
-      grads.variant.length === 5 &&
-      grads.variant[0] === 0xb91c1c && grads.variant[1] === 0xf97316 &&
-      grads.variant[2] === 0xfbbf24 && grads.variant[3] === 0x84cc16 &&
-      grads.variant[4] === 0x22c55e,
+// variant key: every ClinVar significance colour the scheme renders, in
+// severity order. It used to document only five of the ten, which left
+// drug_response -- the class EGFR T790M and L858R actually are -- with no
+// legend entry at all.
+const variantStops = V.SIGNIFICANCE_ORDER.map((c) => V.SIGNIFICANCE_COLORS[c]);
+check("variant key matches the significance colours",
+      grads.variant.length === variantStops.length &&
+      grads.variant.every((c, i) => c === variantStops[i]),
       `(${grads.variant.map(hex).join(" ")})`);
+check("variant key documents every significance class",
+      V.SIGNIFICANCE_ORDER.every((c) => grads.variant.includes(V.SIGNIFICANCE_COLORS[c])));
+check("chain key documents every palette colour",
+      grads.chain.length === C.STRUCT_CHAIN_PALETTE.length,
+      `(${grads.chain.length} of ${C.STRUCT_CHAIN_PALETTE.length})`);
 
 // domain key: the two curated domain palettes (blue / grey / red)
 check("domain key matches the curated domain colours",

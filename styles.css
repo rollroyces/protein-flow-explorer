@@ -1344,6 +1344,52 @@ a:hover { text-decoration: underline; }
   margin-top: 1px;
 }
 
+/* Tissue expression (GTEx) */
+.expr-legend { margin: 6px 0 2px; }
+.expr-scale {
+  display: inline-block;
+  width: 54px;
+  height: 8px;
+  margin: 0 4px;
+  vertical-align: middle;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #64748b, #00a878, #f5c542, #cc1f1f);
+}
+.expr-group { margin-top: 8px; }
+.expr-group-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 2px;
+  margin-bottom: 3px;
+}
+.expr-tissue {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr auto;
+  gap: 6px;
+  align-items: center;
+  font-size: 10.5px;
+  padding: 1.5px 0;
+}
+.expr-tissue-name { color: var(--text-1, inherit); }
+.expr-undetected .expr-tissue-name { opacity: 0.5; }
+.expr-bar {
+  display: block;
+  height: 7px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.expr-bar-fill { display: block; height: 100%; border-radius: 4px; }
+.expr-tpm {
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
 /* Pocket / contact lists */
 .pocket-list, .contact-list {
   margin-top: 8px;

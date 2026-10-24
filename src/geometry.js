@@ -50,7 +50,8 @@
     const n1 = cross(b1, b2);
     const n2 = cross(b2, b3);
     const m1 = Math.sqrt(dot(n1, n1));
-    const m2 = Math.sqrt(dot(n2, n2));
+    // n2 is deliberately left unnormalised: atan2 is invariant under a
+    // positive scaling of both arguments, so normalising it changes nothing.
     const b2n = Math.sqrt(dot(b2, b2));
     // m = b2 / |b2|
     const m = { x: b2.x / b2n, y: b2.y / b2n, z: b2.z / b2n };

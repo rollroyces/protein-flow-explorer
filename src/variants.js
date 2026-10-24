@@ -193,12 +193,9 @@
     if (!vs) return null;
     const spdi = parseSpdi(vs.canonical_spdi);
     if (spdi) return `${spdi.chrom}-${spdi.pos}-${spdi.ref}-${spdi.alt}`;
-    const loc = (vs.variation_loc || []).find((l) => l.assembly_name === "GRCh38");
-    if (!loc || !loc.chr || !loc.start) return null;
-    const chrom = String(parseInt(loc.chr, 10));
-    const pos = parseInt(loc.start, 10);
-    if (!Number.isFinite(pos) || pos < 1) return null;
-    // No alleles available, so the id cannot be completed.
+    // `variation_loc` carries the chromosome and position but its ref and alt
+    // fields are empty in ClinVar's current response, so the id cannot be
+    // completed from it. A missing SPDI means no gnomAD lookup.
     return null;
   }
 

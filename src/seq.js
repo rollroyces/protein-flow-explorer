@@ -212,11 +212,9 @@
       map.set(key, { seqIdx, resn });
     }
     return { map, sequence: (() => {
-      const seq = [];
-      for (const [, v] of map) seq.push(v.seqIdx);  // not used
-      // Reconstruct 1-letter sequence in seqIdx order
+      // Reconstruct the 1-letter sequence in seqIdx order.
       const arr = new Array(seqIdx + 1).fill("X");
-      for (const [k, v] of map) arr[v.seqIdx] = (AA3TO1[v.resn] || "X");
+      for (const v of map.values()) arr[v.seqIdx] = (AA3TO1[v.resn] || "X");
       return arr.join("");
     })() };
   }

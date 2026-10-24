@@ -98,6 +98,9 @@ without the numbers is not evidence.
   positions mapped through the construct's own sequence, wild-type checked
   against the residue, coloured by clinical significance (pathogenic, drug
   response, VUS…), with the population allele frequency from gnomAD
+- **Tissue expression** — median expression across 54 human tissues from GTEx,
+  grouped into compartments, with a specificity verdict: is the protein even
+  made in the tissue where the disease happens?
 - **Pocket detection** — Fpocket-style concavity scan, validated against ground truth
 - **Ligand contacts** — H-bonds (3.5 Å), salt bridges (4.0 Å), π (5.5 Å), hydrophobic
 - **Ligand properties** — MW, HBD/HBA, TPSA, cLogP, Lipinski Ro5, Veber
@@ -118,21 +121,25 @@ Load anything else by PDB ID, gene symbol, UniProt accession, or by dropping a
 
 ```bash
 python3 -m http.server 8765   # then open http://localhost:8765
-npm test                      # 225 assertions across 4 suites
+npm test                      # 770 assertions across 8 suites
 npm run check                 # syntax-check every JS file
+npx eslint@9 .                # lint (the config is in the repo, no dependency)
 ```
 
 No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
 
-The scientific core lives in `src/` as five dependency-free modules —
+The scientific core lives in `src/` as eight dependency-free modules —
 `seq.js` (sequence parsing, alignment, MSA, conservation), `geometry.js`
 (distance/angle/dihedral/RMSD), `pockets.js` (spatial hash, density gates,
 ray casting), `colors.js` (the colour ramps behind every scheme in the
-colour dropdown) and `variants.js` (ClinVar record parsing, significance
-classification, the UniProt→PDB residue map). They load as plain scripts and
-publish themselves on the `PFE` namespace, so they can be `require()`d and
-unit-tested with no DOM stub at all. See [AUDIT.md](AUDIT.md) for the
-architecture review that motivated the split.
+colour dropdown), `variants.js` (ClinVar record parsing, significance
+classification, the UniProt→PDB residue map), `expression.js` (GTEx tissue
+expression and specificity), `validate.js` (input and payload validation) and
+`annotations.js` (the annotation key, cross-checked against the palettes the
+app actually renders). They load as plain scripts and publish themselves on
+the `PFE` namespace, so they can be `require()`d and unit-tested with no DOM
+stub at all. See [AUDIT.md](AUDIT.md) for the architecture review that
+motivated the split.
 
 ## Notes on method
 

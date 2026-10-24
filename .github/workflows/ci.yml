@@ -34,11 +34,17 @@ jobs:
           node --check src/pockets.js
           node --check src/colors.js
           node --check src/variants.js
+          node --check src/expression.js
+          node --check src/validate.js
+          node --check src/annotations.js
           node --check test/bio.test.js
           node --check test/net.test.js
           node --check test/analysis.test.js
           node --check test/colors.test.js
           node --check test/variants.test.js
+          node --check test/expression.test.js
+          node --check test/validate.test.js
+          node --check test/annotations.test.js
 
       # Unit tests for the extracted pure modules. These need no DOM stub,
       # which is exactly what the extraction bought us.
@@ -54,6 +60,14 @@ jobs:
       - name: Variant tests
         run: node test/variants.test.js
 
+      # Tissue expression (GTEx), input/payload validation, and the annotation
+      # key cross-checked against the palettes the app actually renders.
+      - name: Expression, validation and annotation tests
+        run: |
+          node test/expression.test.js
+          node test/validate.test.js
+          node test/annotations.test.js
+
       # Unit tests over the analysis routines.
       - name: Analysis unit tests
         run: node test/bio.test.js
@@ -61,6 +75,12 @@ jobs:
       # Behavioural tests for the network layer (retry / timeout / staleness).
       - name: Network layer tests
         run: node test/net.test.js
+
+      # Lint. The config lives in the repository and needs no dependency:
+      # npx fetches eslint on demand. This is a blocking gate because the
+      # suite is clean.
+      - name: Lint
+        run: npx --yes eslint@9 .
 
       # Dependency audit. 3Dmol.js is pinned to an exact version and loaded
       # from jsDelivr, so audit the runtime we actually depend on.

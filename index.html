@@ -386,6 +386,21 @@
         </div>
 
         <div class="control-section">
+          <h3>Tissue Expression (GTEx)</h3>
+          <p class="muted small">
+            Fetches median expression across 54 human tissues from the GTEx portal.
+            This is the third pillar of a biomarker claim: a variant is only
+            useful if the protein it changes is actually made where the disease
+            happens.
+          </p>
+          <div class="highlight-actions">
+            <button class="btn btn-secondary" id="btn-fetch-expression">🧬 Fetch tissue expression</button>
+            <button class="btn btn-ghost" id="btn-clear-expression">Clear</button>
+          </div>
+          <div class="analysis-status muted small" id="expression-status">No expression loaded.</div>
+        </div>
+
+        <div class="control-section">
           <h3>Pockets & Ligand Contacts</h3>
           <p class="muted small">
             Detects solvent-excluded surface cavities (alpha-sphere grid scan) and, for any
@@ -630,6 +645,9 @@
   <script src="src/pockets.js"></script>
   <script src="src/colors.js"></script>
   <script src="src/variants.js"></script>
+  <script src="src/expression.js"></script>
+  <script src="src/validate.js"></script>
+  <script src="src/annotations.js"></script>
 
   <!-- App code -->
   <script src="app.js"></script>
