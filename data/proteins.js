@@ -52,7 +52,9 @@ const PROTEINS = [
   {
     id: "hiv-protease",
     name: "HIV-1 Protease",
-    pdbIds: ["1HVR", "2PC1"],
+    // 3IXO is the uncomplexed (apo) dimer at 1.7 A with no ligands and no
+    // mutations; it shows the catalytic Asp25 pair in both chains.
+    pdbIds: ["1HVR", "3IXO"],
     stateLabels: ["With inhibitor", "Apo (open)"],
     summary: "Antiretroviral drug target",
     description:
@@ -65,7 +67,7 @@ const PROTEINS = [
         { chain: "A", resi: 25, label: "Asp25 A" },
         { chain: "B", resi: 25, label: "Asp25 B" },
       ],
-      ligand: { resn: "IHV", label: "Inhibitor (drug)" },
+      ligand: { resn: "XK2", label: "Cyclic urea inhibitor (XK2)" },
     },
   },
   {
@@ -172,7 +174,7 @@ const PROTEINS = [
     category: "binding",
     color: "#dc2626",
     highlights: {
-      ligand: { resn: "DNA", label: "p53 response element" },
+      ligand: { resns: ["DA", "DT"], label: "p53 response element" },
       residues: [
         { resi: 175, label: "R175 — hotspot, ~6% of cancers" },
         { resi: 248, label: "R248 — DNA-contact, ~4%" },
@@ -202,15 +204,18 @@ const PROTEINS = [
   {
     id: "kras-g12c",
     name: "KRAS G12C · Sotorasib",
-    pdbIds: ["5VQ2"],
-    stateLabels: ["Active · sotorasib-bound"],
+    // 6OIM is KRAS G12C covalently bound to AMG 510 (sotorasib): the LINK
+    // record joins SG CYS A 12 to C25 of the ligand. Sotorasib traps the
+    // inactive, GDP-bound conformation.
+    pdbIds: ["6OIM"],
+    stateLabels: ["Inactive · sotorasib-bound"],
     summary: "Oncogenic KRAS bound to the first FDA-approved KRAS inhibitor",
     description:
       "KRAS is mutated in ~25% of all human cancers (especially pancreatic, colorectal, lung). The G12C mutation occurs primarily in non-small-cell lung cancer. Sotorasib (Lumakras, 2021) was the first FDA-approved KRAS inhibitor — it covalently binds Cys12 in the switch-II pocket, locking KRAS in its inactive GDP-bound state. This structure shows the drug-bound conformation of the catalytic G-domain.",
     category: "drug-target",
     color: "#ea580c",
     highlights: {
-      ligand: { resn: "YVO", label: "Sotorasib (Lumakras)" },
+      ligand: { resn: "MOV", label: "Sotorasib (Lumakras)" },
       residues: [
         { resi: 12, label: "G12C — oncogenic mutation" },
         { resi: 32, label: "Switch I — effector binding" },

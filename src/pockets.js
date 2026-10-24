@@ -95,9 +95,99 @@
     return hits / POCKET_RAY_N;
   }
 
+  /**
+   * The atoms within `radius` of a point.
+   *
+   * countAtomsNear answers "how many"; this answers "which", which the
+   * pocket detector needs to name the residues that line a cavity.
+   */
+  function atomsNear(hash, x, y, z, radius) {
+    const cx = Math.floor(x / POCKET_CELL), cy = Math.floor(y / POCKET_CELL), cz = Math.floor(z / POCKET_CELL);
+    const span = Math.ceil(radius / POCKET_CELL);
+    const r2 = radius * radius;
+    const out = [];
+    for (let dx = -span; dx <= span; dx++) {
+      for (let dy = -span; dy <= span; dy++) {
+        for (let dz = -span; dz <= span; dz++) {
+          const arr = hash.get(`${cx + dx}|${cy + dy}|${cz + dz}`);
+          if (!arr) continue;
+          for (let i = 0; i < arr.length; i++) {
+            const a = arr[i];
+            const ax = a.x - x, ay = a.y - y, az = a.z - z;
+            if (ax * ax + ay * ay + az * az < r2) out.push(a);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Flood-fill the empty space around a set of seeds.
+   *
+   * The density gates that select pockets also hollow out large cavities:
+   * a voxel in the middle of a big void has too few atoms near it to satisfy
+   * the wall count, so the surviving voxels are only the shell near the
+   * walls, and the resulting "volume" is far too small. Filling the void
+   * region outwards from the pocket's own voxels measures the cavity the way
+   * a pocket finder is supposed to.
+   *
+   * `voidFlags` is the lattice of void voxels produced by the scan: a 1 byte
+   * per lattice cell array, indexed as (i * ny + j) * nz + k.
+   *
+   * @param {Uint8Array} voidFlags
+   * @param {number} ny number of lattice cells along y
+   * @param {number} nz number of lattice cells along z
+   * @param {Array<[number,number,number]>} seeds  lattice indices
+   * @param {{min:[number,number,number], max:[number,number,number]}} limits
+   * @param {number} maxVoxels safety cap
+   * @returns {Array<[number,number,number]>} the filled lattice indices
+   */
+  function floodFillVoid(voidFlags, ny, nz, seeds, limits, maxVoxels) {
+    const out = [];
+    if (!voidFlags || !seeds || !seeds.length) return out;
+    if (!ny || !nz) return out;
+    const cap = maxVoxels || 20000;
+    const idx = (i, j, k) => (i * ny + j) * nz + k;
+    // The lattice's extent in x is implied by its length. Without this bound
+    // the flat index is not injective outside the lattice - a cell at
+    // k = -1 still lands on an in-range byte - so a fill with no limits box
+    // walks out of the lattice and keeps going until the safety cap.
+    const nx = Math.floor(voidFlags.length / (ny * nz));
+    const seen = new Set();
+    const stack = [];
+    for (const s of seeds) {
+      const kk = `${s[0]}|${s[1]}|${s[2]}`;
+      if (seen.has(kk)) continue;
+      seen.add(kk);
+      stack.push([s[0], s[1], s[2]]);
+    }
+    const lo = limits ? limits.min : [-Infinity, -Infinity, -Infinity];
+    const hi = limits ? limits.max : [Infinity, Infinity, Infinity];
+    while (stack.length && out.length < cap) {
+      const c = stack.pop();
+      const i = c[0], j = c[1], k = c[2];
+      if (i < 0 || i >= nx || j < 0 || j >= ny || k < 0 || k >= nz) continue;
+      if (i < lo[0] || i > hi[0] || j < lo[1] || j > hi[1] || k < lo[2] || k > hi[2]) continue;
+      if (!voidFlags[idx(i, j, k)]) continue;
+      out.push([i, j, k]);
+      const nbrs = [[i + 1, j, k], [i - 1, j, k], [i, j + 1, k], [i, j - 1, k],
+                    [i, j, k + 1], [i, j, k - 1]];
+      for (const n of nbrs) {
+        const kk = `${n[0]}|${n[1]}|${n[2]}`;
+        if (seen.has(kk)) continue;
+        seen.add(kk);
+        stack.push(n);
+      }
+    }
+    return out;
+  }
+
   const api = {
     buildAtomHash,
     countAtomsNear,
+    atomsNear,
+    floodFillVoid,
     rayHits,
     enclosureFraction,
   };

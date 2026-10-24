@@ -27,7 +27,8 @@
           conservationScores, buildResidueIndex, AA3TO1 } = PFE.seq;
   const { midPoint, computeDistance, computeAngle, computeDihedral,
           computePerResidueRmsd } = PFE.geometry;
-  const { buildAtomHash, countAtomsNear, enclosureFraction } = PFE.pockets;
+  const { buildAtomHash, countAtomsNear, atomsNear, floodFillVoid,
+          enclosureFraction } = PFE.pockets;
   const { STRUCT_CHAIN_PALETTE, ssColor, spectrumColor, bfactorColor,
           hydrophobicityColor, plddtColor, conservationColor } = PFE.colors;
   const { SIGNIFICANCE_COLORS, parseProteinChange,
@@ -38,6 +39,10 @@
           validateClinVarRecord, validateGnomadResponse, validateFasta } = PFE.validate;
   const { parseMedianExpression, groupByCompartment, summarizeExpression,
           logExpression, EXPRESSION_TPM_MAX } = PFE.expression;
+  const { druggabilityVerdict, validatePocketsAgainstLigand, crossValidateLigand,
+          contactResidues, pocketResidueRecall, molecularWeight, formatFormula,
+          canonicalElement,
+          formatPotency, summariseAffinity, summariseTarget, matchDrugToLigand } = PFE.drug;
 
   // ====== GLOBAL STATE ======
   const state = {
@@ -96,6 +101,7 @@
     variants: [],            // [{resi, chain, mutation, significance, color}]
     variantByResidue: new Map(),   // "chain:resi" -> colour, for the variant scheme
     expression: null,              // GTEx tissue expression for the loaded gene
+    drugProfile: null,             // drug-discovery profile for the loaded target
     variantRateLimited: false,     // gnomAD refused some frequency lookups
     variantLookupErrors: 0,        // gnomAD lookups that failed outright
     _uniprotInfo: null,      // cached {accession, gene, sequence} for the loaded structure
@@ -216,6 +222,9 @@
     btnFetchExpression: $("btn-fetch-expression"),
     btnClearExpression: $("btn-clear-expression"),
     expressionStatus: $("expression-status"),
+    btnFetchDrugProfile: $("btn-fetch-drug-profile"),
+    btnClearDrugProfile: $("btn-clear-drug-profile"),
+    drugStatus: $("drug-status"),
     variantsStatus: $("variants-status"),
     btnDetectPockets: $("btn-detect-pockets"),
     btnAnalyzeContacts: $("btn-analyze-contacts"),
@@ -852,6 +861,13 @@
     state.currentProtein = protein;
     state.currentPdbIndex = 0;
     state._chainOrder = []; // reset chain->colour mapping for the new structure
+    // The ligand selection belongs to the structure that was just replaced.
+    // Leaving the previous protein's ligand active would make the drug panel
+    // cross-validate this structure against the other one's ligand.
+    state.ligands = [];
+    state.activeLigand = null;
+    state.drugProfile = null;
+    if (dom.drugStatus) dom.drugStatus.textContent = "No drug profile loaded.";
     // Tissue expression is per-gene: leaving the previous gene's data on
     // screen over a different structure would be a different structure's
     // numbers presented as this one's.
@@ -999,6 +1015,22 @@
     };
   }
 
+  /**
+   * The residue names a highlight refers to.
+   *
+   * Most highlights are a single ligand (AQ4, XK2). The p53 entry highlights
+   * a DNA duplex, which is two strands with different residue names, so the
+   * list form is supported too.
+   */
+  function highlightResidues(highlight) {
+    if (!highlight) return null;
+    if (Array.isArray(highlight.resns) && highlight.resns.length) {
+      return highlight.resns.map((r) => String(r).toUpperCase());
+    }
+    if (highlight.resn) return [String(highlight.resn).toUpperCase()];
+    return null;
+  }
+
   function applyAllStyles() {
     state.models.forEach((m, idx) => applyStyleToModel(m, idx));
     // Re-apply RMSD coloring if active
@@ -1011,8 +1043,9 @@
     state.viewer.setStyle(sel, style);
 
     const protein = state.currentProtein;
-    if (protein && protein.highlights && protein.highlights.ligand) {
-      state.viewer.setStyle({ model: idx, resn: protein.highlights.ligand.resn }, {
+    const hlResn = highlightResidues(protein && protein.highlights && protein.highlights.ligand);
+    if (hlResn) {
+      state.viewer.setStyle({ model: idx, resn: hlResn }, {
         stick: { color: "magenta", radius: 0.18 },
       });
     }
@@ -2602,6 +2635,301 @@
     dom.expressionStatus.textContent = "No expression loaded.";
   });
 
+  // ----- Drug discovery: target profile, measured potency, site validation -----
+  //
+  // The question a structure is actually asked in a discovery project is
+  // "is this a target, and is this the site?" This panel answers it with
+  // three independent sources:
+  //
+  //   Open Targets  - is this a druggable target? how many diseases, how
+  //                   many drugs, is it a kinase, is it already drugged?
+  //   RCSB/BindingDB - what is the MEASURED potency of the ligand bound here?
+  //   the model itself - does the pocket finder find the site the ligand is
+  //                   actually in, and do the app's own descriptors agree
+  //                   with the chemical component dictionary?
+  //
+  // The last of those is the cross-validation: the pocket finder never sees
+  // the ligand, so if the top pocket contains the crystallographic ligand,
+  // the detector and the experiment agree.
+
+  const OT_API = "https://api.platform.opentargets.org/api/v4/graphql";
+  const OT_TARGET_QUERY = `query($id: String!) {
+    target(ensemblId: $id) {
+      id approvedSymbol approvedName
+      targetClass { id label }
+      associatedDiseases(page: {index: 0, size: 5}) { count rows { disease { id name } score } }
+      drugAndClinicalCandidates { count rows { id maxClinicalStage drug { id name maximumClinicalStage drugType } } }
+      tractability { label modality value }
+    }
+  }`;
+
+  /** Ensembl gene id for a UniProt accession, via UniProt's own cross-references. */
+  async function fetchEnsemblGeneId(accession) {
+    try {
+      const r = await net(`https://rest.uniprot.org/uniprotkb/${accession}?fields=xref_ensembl`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      for (const x of j.uniProtKBCrossReferences || []) {
+        const props = {};
+        for (const p of x.properties || []) props[p.key] = p.value;
+        if (props.GeneId) return String(props.GeneId).split(".")[0];
+      }
+    } catch (e) { /* fall through */ }
+    return null;
+  }
+
+  /** The authoritative chemical component record for a ligand. */
+  async function fetchChemicalComponent(compId) {
+    if (!compId) return null;
+    try {
+      const r = await net(`https://data.rcsb.org/rest/v1/core/chemcomp/${compId}`);
+      if (!r.ok) return null;
+      const j = await r.json();
+      const cc = j.chem_comp || {};
+      return {
+        compId,
+        name: cc.name || "",
+        formula: cc.formula || "",
+        formulaWeight: Number(cc.formula_weight),
+        smiles: (j.rcsb_chem_comp_descriptor || {}).SMILES || "",
+        inchikey: (j.rcsb_chem_comp_descriptor || {}).InChIKey || "",
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Fetch everything the drug-discovery panel needs, then render it. */
+  async function fetchDrugProfile() {
+    if (!state.currentProtein) {
+      showCustomError("Load a protein first.");
+      return;
+    }
+    dom.btnFetchDrugProfile.disabled = true;
+    dom.drugStatus.textContent = "Looking up the target…";
+
+    try {
+      const accession = state.meta && state.meta.uniprot;
+      if (!accession) {
+        dom.drugStatus.textContent =
+          "No UniProt accession for this structure, so the target could not be identified.";
+        return;
+      }
+
+      // --- target profile (Open Targets) ---
+      dom.drugStatus.textContent = `Looking up ${accession} in Open Targets…`;
+      let target = null;
+      let otError = null;
+      try {
+        const ensg = await fetchEnsemblGeneId(accession);
+        if (ensg) {
+          const r = await net(OT_API, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: OT_TARGET_QUERY, variables: { id: ensg } }),
+          });
+          if (r.ok) {
+            const j = await r.json();
+            if (j.errors && j.errors.length) otError = j.errors[0].message;
+            else target = summariseTarget(j.data && j.data.target);
+          } else {
+            otError = `HTTP ${r.status}`;
+          }
+        } else {
+          otError = "no Ensembl gene id for this accession";
+        }
+      } catch (e) {
+        otError = e.message;
+      }
+
+      // --- the bound ligand: authoritative record and measured potency ---
+      const lig = state.activeLigand;
+      const compId = lig && lig.compId;
+      let ccd = null;
+      if (compId) {
+        dom.drugStatus.textContent = `Reading the chemical component for ${compId}…`;
+        ccd = await fetchChemicalComponent(compId);
+      }
+      const forLigand = (state.meta && state.meta.bindingAffinity || [])
+        .filter((a) => !compId || a.comp_id === compId);
+
+      // --- the site's druggability and the cross-validation ---
+      const model = state.models[state.currentPdbIndex];
+      const ligAtoms = compId
+        ? ligandInstanceAtoms(model, compId, lig && lig.instance)
+        : [];
+      const siteCheck = validatePocketsAgainstLigand(state.pockets, ligAtoms, 5);
+
+      // The crystallographic ground truth for the binding site: the residues
+      // that actually touch the bound ligand. The pocket that covers those
+      // residues is the real site, whichever pocket the finder ranked first.
+      const waters = new Set(["HOH", "WAT", "H2O", "DOD"]);
+      const ligIdx = new Set(ligAtoms.map((a) => a.index));
+      const proteinAtoms = compId
+        ? safeSelect(model, {}).filter(
+            (a) => !ligIdx.has(a.index) &&
+                   !waters.has((a.resn || "").trim().toUpperCase()))
+        : [];
+      const contacts = contactResidues(ligAtoms, proteinAtoms, 4.0);
+      const recall = siteCheck.found
+        ? pocketResidueRecall(state.pockets[siteCheck.index], contacts, proteinAtoms, POCKET_LINING_R)
+        : null;
+      const props = compId ? computeLigandProperties(compId, lig && lig.instance) : null;
+      const validation = props && ccd
+        ? crossValidateLigand(props, { formula_weight: ccd.formulaWeight, formula: ccd.formula },
+                             props.composition)
+        : { checks: [], agree: false };
+      const pocketRows = (state.pockets || []).map((p, i) => {
+        const d = druggabilityVerdict(p);
+        const occ = siteCheck.perPocket.find((o) => o.index === i);
+        return {
+          index: i,
+          volume: p.volume,
+          enclosure: p.enclosure,
+          verdict: d.verdict,
+          label: d.label,
+          reasons: d.reasons,
+          occupancy: occ ? occ.occupancy : 0,
+          meanDistance: occ ? occ.meanDistance : null,
+        };
+      });
+
+      // --- is the bound ligand itself one of the target's drugs? ---
+      const matchedDrug = target ? matchDrugToLigand(
+        (lig && lig.name) || (ccd && ccd.name), compId, target.drugs) : null;
+
+      state.drugProfile = {
+        target, otError, ccd, affinity: summariseAffinity(forLigand),
+        siteCheck, validation, pockets: pocketRows, matchedDrug, accession,
+        contacts, recall, hasLigand: !!compId,
+      };
+      renderDrugPanel();
+      showToast("Drug discovery profile loaded", "success");
+    } catch (err) {
+      state.drugProfile = null;
+      dom.drugStatus.textContent = `Drug profile failed: ${err.message}`;
+      showCustomError(`Drug profile failed: ${err.message}`);
+    } finally {
+      dom.btnFetchDrugProfile.disabled = false;
+    }
+  }
+
+  /** Render the drug-discovery panel. */
+  function renderDrugPanel() {
+    const d = state.drugProfile;
+    if (!d) {
+      dom.drugStatus.textContent = "No drug profile loaded.";
+      return;
+    }
+    const parts = [];
+
+    // --- target ---
+    if (d.target) {
+      const t = d.target;
+      parts.push(`<div class="drug-block">
+        <div class="drug-block-head">Target</div>
+        <div class="drug-kv"><span>Gene</span><span><b>${escapeHtml(t.symbol)}</b> — ${escapeHtml(t.name || "")}</span></div>
+        ${t.classes.length ? `<div class="drug-kv"><span>Class</span><span>${escapeHtml(t.classes.slice(0, 3).join(" · "))}</span></div>` : ""}
+        <div class="drug-kv"><span>Diseases</span><span>${t.diseaseCount} associated${t.diseaseCount ? ` — top: ${escapeHtml(t.diseases[0] ? t.diseases[0].name : "—")}` : ""}</span></div>
+        <div class="drug-kv"><span>Drugs</span><span>${t.drugCount} candidates · ${t.approvedDrugs} approved</span></div>
+        <div class="drug-kv"><span>Tractability</span><span>${t.isApprovedDrug
+          ? '<span class="drug-flag drug-flag-yes">Approved drug</span>'
+          : '<span class="drug-flag drug-flag-no">No approved drug</span>'}</span></div>
+        ${t.drugs.length ? `<div class="drug-sub">Known candidates</div>
+          <div class="drug-list">${t.drugs.slice(0, 8).map((x) =>
+            `<span class="drug-pill">${escapeHtml(x.name)}<em>${escapeHtml(x.stage.replace("PHASE_", "P").replace("APPROVAL", "approved"))}</em></span>`).join("")}</div>` : ""}
+      </div>`);
+    } else if (d.otError) {
+      parts.push(`<div class="drug-block"><div class="drug-block-head">Target</div>
+        <div class="muted small">Open Targets could not be reached (${escapeHtml(d.otError)}).</div></div>`);
+    }
+
+    // --- the bound ligand ---
+    if (d.ccd) {
+      const a = d.affinity;
+      parts.push(`<div class="drug-block">
+        <div class="drug-block-head">Bound ligand${d.ccd.compId ? ` (${escapeHtml(d.ccd.compId)})` : ""}</div>
+        <div class="drug-kv"><span>Name</span><span>${escapeHtml((d.ccd.name || "").slice(0, 90))}</span></div>
+        <div class="drug-kv"><span>Formula</span><span>${escapeHtml(d.ccd.formula || "—")} · ${d.ccd.formulaWeight ? d.ccd.formulaWeight.toFixed(2) + " Da" : "—"}</span></div>
+        <div class="drug-kv"><span>Measured</span><span>${a.n
+          ? `${a.types.join("/")} <b>${escapeHtml(formatPotency(a.best.value, a.best.unit))}</b> <em class="muted">(${a.n} measurement${a.n === 1 ? "" : "s"})</em>`
+          : '<em class="muted">no measured affinity for this ligand</em>'}</span></div>
+        ${d.matchedDrug ? `<div class="drug-kv"><span>Also</span><span>this is a known candidate for the target — <b>${escapeHtml(d.matchedDrug.name)}</b> (${escapeHtml(d.matchedDrug.stage)})</span></div>` : ""}
+      </div>`);
+    }
+
+    // --- pocket druggability ---
+    if (d.pockets.length) {
+      parts.push(`<div class="drug-block">
+        <div class="drug-block-head">Detected pockets</div>
+        <div class="drug-table-head"><span>#</span><span>Volume</span><span>Enclosure</span><span>Verdict</span><span>Ligand</span></div>
+        ${d.pockets.map((p) => `<div class="drug-table-row${p.occupancy > 0.5 ? " drug-row-hit" : ""}">
+          <span>${p.index + 1}</span>
+          <span>${Math.round(p.volume)} Å³</span>
+          <span>${Number.isFinite(p.enclosure) ? p.enclosure.toFixed(2) : "—"}</span>
+          <span class="drug-verdict drug-verdict-${p.verdict}">${escapeHtml(p.label)}</span>
+          <span>${p.occupancy > 0 ? Math.round(p.occupancy * 100) + "%" : "—"}</span>
+        </div>`).join("")}
+      </div>`);
+    }
+
+    // --- cross-validation ---
+    const checks = [];
+    if (!d.hasLigand) {
+      checks.push({
+        ok: false,
+        name: "Pocket finder vs crystallography",
+        detail: "select a ligand in the structure list to cross-validate against",
+      });
+    } else if (!d.pockets.length) {
+      checks.push({
+        ok: false,
+        name: "Pocket finder vs crystallography",
+        detail: "no pockets detected yet — run Detect pockets first",
+      });
+    } else if (d.siteCheck.found) {
+      checks.push({
+        ok: d.siteCheck.occupancy >= 0.5,
+        name: "Pocket finder vs crystallography",
+        detail: `pocket ${d.siteCheck.index + 1} contains ${Math.round(d.siteCheck.occupancy * 100)}% of the bound ligand's atoms`,
+      });
+      if (d.recall) {
+        checks.push({
+          ok: d.recall.recall >= 0.5,
+          name: "Binding-site residues",
+          detail: `${d.recall.covered} of ${d.recall.total} residues touching the ligand are inside the pocket`,
+        });
+      }
+    } else {
+      checks.push({
+        ok: false,
+        name: "Pocket finder vs crystallography",
+        detail: "no detected pocket contains the bound ligand",
+      });
+    }
+    for (const c of d.validation.checks) {
+      checks.push({ ok: c.ok, name: c.name, detail: c.detail });
+    }
+    if (checks.length) {
+      const passed = checks.filter((c) => c.ok).length;
+      parts.push(`<div class="drug-block">
+        <div class="drug-block-head">Cross-validation <span class="drug-verdict drug-verdict-${passed === checks.length ? "druggable" : "marginal"}">${passed}/${checks.length} agree</span></div>
+        ${checks.map((c) => `<div class="drug-check">
+          <span class="drug-check-mark">${c.ok ? "✓" : "✗"}</span>
+          <span><b>${escapeHtml(c.name)}</b><br><em class="muted">${escapeHtml(c.detail)}</em></span>
+        </div>`).join("")}
+      </div>`);
+    }
+
+    dom.drugStatus.innerHTML = parts.join("");
+  }
+
+  dom.btnFetchDrugProfile.addEventListener("click", fetchDrugProfile);
+  dom.btnClearDrugProfile.addEventListener("click", () => {
+    state.drugProfile = null;
+    dom.drugStatus.textContent = "No drug profile loaded.";
+  });
+
   // ----- Pocket detection (alpha-sphere grid scan) -----
 // ---- pocket detection -------------------------------------------------
   // Alpha-sphere scan in the spirit of Fpocket, but computed on a grid so it
@@ -2627,6 +2955,22 @@
   const POCKET_MIN_GLOBAL = 45;
   const POCKET_MIN_ENCLOSURE = 0.80;
   const POCKET_CLUSTER_R = 3.0;
+  // How close a crystallographic ligand atom must be to a cavity voxel for
+  // the ligand to count as occupying that pocket.
+  const POCKET_LIG_R = 2.5;
+  // How far a protein atom may sit from a cavity voxel and still count as
+  // lining that cavity.
+  const POCKET_LINING_R = 4.6;
+  // How many pockets get their cavity filled in, how far the fill may
+  // spread from the pocket's own voxels, and how many voxels it may claim.
+  // The spread limit matters: a protein's empty space is one connected
+  // sponge, so an unbounded fill swallows the whole protein's interior and
+  // every pocket comes out the same size. Bounded to the pocket's own
+  // neighbourhood, the fill measures the local concavity, which is what a
+  // pocket actually is.
+  const POCKET_FILL_CANDIDATES = 16;
+  const POCKET_FILL_MARGIN = 2;
+  const POCKET_FILL_MAX = 4000;
 
   // Fibonacci sphere unit vectors, computed once.
 
@@ -2642,16 +2986,35 @@
     setTimeout(async () => {
       try {
         const model = state.models[state.currentPdbIndex];
-        const atoms = model.selectedAtoms({ elem: { not: "H" } });
+        // NB: 3Dmol only understands `not` as a *top-level* boolean operator.
+        // A nested spec such as { elem: { not: "H" } } is compared literally
+        // against the element string and therefore matches nothing, which
+        // made this detector silently report "no heavy atoms" for every
+        // structure. { not: { elem: "H" } } is the correct spelling.
+        const atoms = model.selectedAtoms({ not: { elem: "H" } });
         if (!atoms || !atoms.length) {
           dom.pocketsStatus.textContent = "No heavy atoms in structure.";
           dom.btnDetectPockets.disabled = false;
           return;
         }
 
+        // A pocket finder is run on the *apo* protein: the bound ligand is
+        // taken out before the scan and overlaid afterwards to score the
+        // result. Leaving the ligand in would fill the very cavity we are
+        // looking for, and would make the drug panel's cross-validation
+        // circular.
+        const activeLig = state.activeLigand;
+        const ligAtoms = (activeLig && activeLig.compId)
+          ? ligandInstanceAtoms(model, activeLig.compId, activeLig.instance)
+          : [];
+        const ligIndex = new Set(ligAtoms.map((a) => a.index));
+        const proteinAtoms = ligIndex.size
+          ? atoms.filter((a) => !ligIndex.has(a.index))
+          : atoms;
+
         let minX = Infinity, minY = Infinity, minZ = Infinity;
         let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-        for (const a of atoms) {
+        for (const a of proteinAtoms) {
           if (a.x < minX) minX = a.x; if (a.x > maxX) maxX = a.x;
           if (a.y < minY) minY = a.y; if (a.y > maxY) maxY = a.y;
           if (a.z < minZ) minZ = a.z; if (a.z > maxZ) maxZ = a.z;
@@ -2660,15 +3023,24 @@
         minX -= PAD; minY -= PAD; minZ -= PAD;
         maxX += PAD; maxY += PAD; maxZ += PAD;
 
-        const hash = buildAtomHash(atoms);
+        const hash = buildAtomHash(proteinAtoms);
 
         // Pass 1 — density gates. Runs in time-sliced chunks so a large structure
         // (e.g. a 23k-atom ribosome, ~8.7M grid points) cannot freeze the UI.
         // Synchronously this measured 1.55 s on EGFR and ~80 s on 6VXX.
+        //
+        // Every lattice cell is also recorded as void or not. The density
+        // gates hollow out large cavities - a voxel in the middle of a big
+        // void fails the wall count - so the surviving voxels are only the
+        // shell near the walls, and counting them under-estimates the
+        // pocket's volume badly. The void lattice lets the cavity be filled
+        // properly afterwards.
         const cands = [];
         const SLICE_MS = 12;             // work per frame before yielding
         const nx = Math.ceil((maxX - minX) / POCKET_GRID);
         const ny = Math.ceil((maxY - minY) / POCKET_GRID);
+        const nz = Math.ceil((maxZ - minZ) / POCKET_GRID);
+        const voidFlags = new Uint8Array(nx * ny * (nz + 1));
         const totalPlanes = nx * ny;
         let sliceStart = performance.now();
         let planesDone = 0;
@@ -2676,13 +3048,15 @@
           for (let iy = 0; iy < ny; iy++) {
             const x = minX + ix * POCKET_GRID;
             const y = minY + iy * POCKET_GRID;
-            for (let z = minZ; z <= maxZ; z += POCKET_GRID) {
+            for (let kz = 0; kz <= nz; kz++) {
+              const z = minZ + kz * POCKET_GRID;
               if (countAtomsNear(hash, x, y, z, POCKET_VOID_R) > 0) continue;
+              voidFlags[(ix * ny + iy) * (nz + 1) + kz] = 1;
               const wall = countAtomsNear(hash, x, y, z, POCKET_WALL_R);
               if (wall < POCKET_MIN_WALL) continue;
               const global = countAtomsNear(hash, x, y, z, POCKET_GLOBAL_R);
               if (global < POCKET_MIN_GLOBAL) continue;
-              cands.push({ x, y, z, wall, global, e: 0 });
+              cands.push({ x, y, z, ix, iy, kz, wall, global, e: 0 });
             }
             planesDone++;
           }
@@ -2757,39 +3131,82 @@
           const n = cluster.length;
           pockets.push({
             center: [cx / n, cy / n, cz / n],
+            shellVolume: n * POCKET_GRID * POCKET_GRID * POCKET_GRID,
             volume: n * POCKET_GRID * POCKET_GRID * POCKET_GRID,
             enclosure: meanE / n,
+            seeds: cluster.map((p) => [p.ix, p.iy, p.kz]),
+            points: null,
+            ligOcc: 0,
+            ligFrac: 0,
             residues: [],
           });
         }
 
-        // Rank by volume; if a ligand is loaded, promote pockets it occupies.
-        const ligAtoms = (state.activeLigand && state.activeLigand.compId)
-          ? safeSelect(model, { resn: state.activeLigand.compId })
-          : [];
-        for (const pk of pockets) {
-          pk.drugOcc = 0;
-          if (ligAtoms.length) {
-            let hit = 0;
-            for (const la of ligAtoms) {
-              const d = computeDistance({ x: pk.center[0], y: pk.center[1], z: pk.center[2] }, la);
-              if (d <= 5) { hit++; break; }
+        // Fill the cavities. The density gates only keep the voxels near the
+        // walls of a void, so the shell count badly under-estimates a large
+        // cavity. Flooding the empty space outwards from the pocket's own
+        // voxels measures the cavity properly - this is the difference
+        // between a 100 A^3 reading for a site that actually holds a
+        // 400 A^3 drug and a correct number.
+        pockets.sort((a, b) => b.shellVolume - a.shellVolume);
+        const candidates = pockets.slice(0, POCKET_FILL_CANDIDATES);
+        for (const pk of candidates) {
+          let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+          for (const s of pk.seeds) {
+            for (let d = 0; d < 3; d++) {
+              if (s[d] < lo[d]) lo[d] = s[d];
+              if (s[d] > hi[d]) hi[d] = s[d];
             }
-            pk.drugOcc = hit;
+          }
+          const limits = {
+            min: [lo[0] - POCKET_FILL_MARGIN, lo[1] - POCKET_FILL_MARGIN, lo[2] - POCKET_FILL_MARGIN],
+            max: [hi[0] + POCKET_FILL_MARGIN, hi[1] + POCKET_FILL_MARGIN, hi[2] + POCKET_FILL_MARGIN],
+          };
+          const cells = floodFillVoid(voidFlags, ny, nz + 1, pk.seeds, limits, POCKET_FILL_MAX);
+          pk.cells = cells;
+          pk.points = cells.map((c) => [
+            minX + c[0] * POCKET_GRID,
+            minY + c[1] * POCKET_GRID,
+            minZ + c[2] * POCKET_GRID,
+          ]);
+          pk.volume = cells.length * POCKET_GRID * POCKET_GRID * POCKET_GRID;
+          if (cells.length) {
+            let sx = 0, sy = 0, sz = 0;
+            for (const p of pk.points) { sx += p[0]; sy += p[1]; sz += p[2]; }
+            pk.center = [sx / cells.length, sy / cells.length, sz / cells.length];
           }
         }
-        pockets.sort((a, b) => (b.drugOcc - a.drugOcc) || (b.volume - a.volume));
-        const top = pockets.slice(0, 8);
+        candidates.sort((a, b) => b.volume - a.volume);
+        const top = candidates.slice(0, 8);
 
-        // Map each pocket to its lining residues.
+        // Map each pocket to the residues that line its cavity, and measure
+        // how much of the bound ligand sits inside it.
         for (const pk of top) {
           const set = new Set();
-          const r2 = POCKET_CLUSTER_R * POCKET_CLUSTER_R;
-          for (const a of atoms) {
-            const dx = a.x - pk.center[0], dy = a.y - pk.center[1], dz = a.z - pk.center[2];
-            if (dx * dx + dy * dy + dz * dz < r2) set.add(`${a.chain}:${a.resi}`);
+          if (pk.points) {
+            for (const p of pk.points) {
+              for (const a of atomsNear(hash, p[0], p[1], p[2], POCKET_LINING_R)) {
+                set.add(`${a.chain}:${a.resi}`);
+              }
+            }
           }
           pk.residues = Array.from(set).slice(0, 25);
+
+          // How much of the bound ligand sits in this cavity? The ligand was
+          // removed before the scan, so this is a real test: the cavity was
+          // found without ever being told where the ligand sits.
+          if (ligAtoms.length && pk.points) {
+            const hit = new Set();
+            for (let li = 0; li < ligAtoms.length; li++) {
+              const la = ligAtoms[li];
+              for (const p of pk.points) {
+                const dx = la.x - p[0], dy = la.y - p[1], dz = la.z - p[2];
+                if (dx * dx + dy * dy + dz * dz <= POCKET_LIG_R * POCKET_LIG_R) { hit.add(li); break; }
+              }
+            }
+            pk.ligOcc = hit.size;
+            pk.ligFrac = pk.ligOcc / ligAtoms.length;
+          }
         }
         state.pockets = top;
 
@@ -2815,7 +3232,7 @@
 
         dom.pocketList.innerHTML = top.length
           ? top.map((pk, i) => `
-            <div class="pocket-row">
+            <div class="pocket-row${pk.ligOcc ? " pocket-row-ligand" : ""}">
               <span class="pocket-rank">#${i + 1}</span>
               <span class="pocket-vol">~${pk.volume.toFixed(0)} Å³</span>
               <span class="pocket-name">encl ${(pk.enclosure * 100).toFixed(0)}%</span>
@@ -2823,9 +3240,15 @@
             </div>`).join("")
           : '<div class="measurement-table-empty">No cavities detected</div>';
 
-        const occ = ligAtoms.length ? " (ranked by bound-ligand occupancy)" : "";
-        dom.pocketsStatus.textContent =
-          `Found ${top.length} pocket${top.length === 1 ? "" : "s"}${occ}. Volumes are grid estimates.`;
+        if (!top.length) {
+          dom.pocketsStatus.textContent = "No cavities detected in this structure.";
+        } else {
+          const note = ligAtoms.length
+            ? " (the bound ligand was excluded from the scan, then used to check the result)"
+            : "";
+          dom.pocketsStatus.textContent =
+            `Found ${top.length} pocket${top.length === 1 ? "" : "s"}, ranked by volume${note}. Volumes are grid estimates.`;
+        }
       } catch (err) {
         dom.pocketsStatus.textContent = `Pocket detection failed: ${err.message}`;
       } finally {
@@ -3093,6 +3516,8 @@
       state.currentPdbIndex = a.pdbIndex;
       updateStateBadge(a.pdbIndex);
       applyAllStyles();
+      // The metadata and the ligand list belong to a single structure.
+      loadStructureMetadata();
     }
     if (a.style && a.colorScheme) {
       state.currentStyle = a.style;
@@ -3189,10 +3614,10 @@
     state.viewer.setStyle({ model: idxA }, { cartoon: resolveColor(state.currentColor, opacityA) });
     state.viewer.setStyle({ model: idxB }, { cartoon: resolveColor(state.currentColor, opacityB) });
     const protein = state.currentProtein;
-    if (protein.highlights && protein.highlights.ligand) {
-      const ligandResn = protein.highlights.ligand.resn;
-      state.viewer.setStyle({ model: idxA, resn: ligandResn }, { stick: { color: "magenta", radius: 0.2 } });
-      state.viewer.setStyle({ model: idxB, resn: ligandResn }, { stick: { color: "magenta", radius: 0.2 } });
+    const hlResn = highlightResidues(protein.highlights && protein.highlights.ligand);
+    if (hlResn) {
+      state.viewer.setStyle({ model: idxA, resn: hlResn }, { stick: { color: "magenta", radius: 0.2 } });
+      state.viewer.setStyle({ model: idxB, resn: hlResn }, { stick: { color: "magenta", radius: 0.2 } });
     }
     state.viewer.render();
   }
@@ -3294,11 +3719,17 @@
       return;
     }
     dom.metaGrid.innerHTML = '<div class="muted small">Loading metadata…</div>';
+    // Metadata is per structure. When the structure changes while a fetch
+    // is in flight the two would otherwise interleave and leave the ligand
+    // list describing one structure and the header another.
+    const wantedIndex = state.currentPdbIndex;
+    const superseded = () => state.currentPdbIndex !== wantedIndex;
     try {
       const id = pdbId.toLowerCase();
       const entryRes = await net(`https://data.rcsb.org/rest/v1/core/entry/${id}`, undefined, gen);
       if (!entryRes.ok) throw new Error(`entry ${entryRes.status}`);
       const entry = await entryRes.json();
+      if (superseded()) return;
       const info = entry.rcsb_entry_info || {};
       const method = (entry.exptl && entry.exptl[0] && entry.exptl[0].method) || "—";
       const resArr = info.resolution_combined || [];
@@ -3311,7 +3742,15 @@
       const released = entry.rcsb_accession_info?.initial_release_date || "—";
       const title = (entry.struct && entry.struct.title) || protein.name;
 
-      state.meta = { pdbId, method, resolution, rfree, rwork, deposited, released, title };
+      // The metadata is assembled locally and handed over in one go at the
+      // end. Writing it into state.meta field by field would leave the app
+      // describing two different structures when two loads overlap.
+      const meta = { pdbId, method, resolution, rfree, rwork, deposited, released, title };
+
+      // Measured affinity of the bound ligand, from BindingDB via RCSB. This
+      // is a measured potency for this complex, which is the number a drug
+      // discovery question actually turns on.
+      meta.bindingAffinity = entry.rcsb_binding_affinity || [];
 
       // Chains and UniProt accession (SIFTS) for the cross-reference panel.
       const chains = [];
@@ -3353,11 +3792,11 @@
           }
         } catch (e) { /* skip entity */ }
       }
-      state.meta.chains = chains;
-      state.meta.uniprot = uniprot;
-      state.meta.sifts = sifts;
-      state.meta.polymerEntities = polymerIds.length;
-      state.meta.nonPolymerEntities = (entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || []).length;
+      meta.chains = chains;
+      meta.uniprot = uniprot;
+      meta.sifts = sifts;
+      meta.polymerEntities = polymerIds.length;
+      meta.nonPolymerEntities = (entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || []).length;
 
       // Ligands: fetch each non-polymer entity
       const npIds = entry.rcsb_entry_container_identifiers?.non_polymer_entity_ids || [];
@@ -3382,7 +3821,12 @@
           });
         } catch (e) { /* skip entity */ }
       }
+      if (superseded()) return;
+      state.meta = meta;
       state.ligands = ligands;
+      // A new structure means the previous structure's drug readout is stale.
+      state.drugProfile = null;
+      if (dom.drugStatus) dom.drugStatus.textContent = "No drug profile loaded.";
       renderMetadataPanel();
       renderLigandList();
       refreshPresentationIfReady();
@@ -3434,13 +3878,25 @@
 
   // ====== LIGAND BROWSER ======
   function renderLigandList() {
-    const ligs = state.ligands || [];
-    if (!ligs.length) {
+    if (!state.ligands || !state.ligands.length) {
       dom.ligandList.innerHTML = '<div class="measurement-table-empty">No ligands in this entry</div>';
       dom.ligandSelect.innerHTML = "";
       dom.propGrid.innerHTML = "";
       return;
     }
+    // Put the ligand the entry is about first. The KRAS entry exists to show
+    // sotorasib, but the structure also carries the nucleotides, and those
+    // would otherwise take the top of the list. The list is sorted in place
+    // so that the row indices and the select options stay in step.
+    const featured = highlightResidues(state.currentProtein &&
+                                       state.currentProtein.highlights &&
+                                       state.currentProtein.highlights.ligand) || [];
+    if (featured.length) {
+      state.ligands.sort((a, b) =>
+        (featured.includes(a.compId.toUpperCase()) ? -1 : 0) -
+        (featured.includes(b.compId.toUpperCase()) ? -1 : 0));
+    }
+    const ligs = state.ligands;
     dom.ligandList.innerHTML = ligs
       .map((l, i) => `
         <div class="ligand-row" data-lig="${i}">
@@ -3467,6 +3923,10 @@
     const ligs = state.ligands || [];
     const l = ligs[index];
     if (!l) return;
+    // Resolve which copy of the ligand this is. Haemoglobin has four haems
+    // and an inhibitor can sit in both halves of a homodimer; the properties
+    // and the cross-validation are about one molecule, not all of them.
+    l.instance = findLigandInstance(state.models[state.currentPdbIndex], l.compId);
     state.activeLigand = l;
     dom.ligandList.querySelectorAll(".ligand-row").forEach((r, i) => {
       r.classList.toggle("active", i === index);
@@ -3486,28 +3946,74 @@
   }
 
   // Physicochemical descriptors computed from the loaded model.
-  function computeLigandProperties(compId) {
+  /**
+   * Locate one copy of a ligand in the model.
+   *
+   * A ligand often appears in several chains - haemoglobin carries four
+   * copies of the haem, and an inhibitor can sit in both halves of a
+   * homodimer. The Chemical Component Dictionary describes a single
+   * molecule, so selecting by residue name alone picks up every copy and
+   * makes the app's own descriptors disagree with the reference. This
+   * resolves the first instance so the rest of the code can work with one
+   * molecule at a time.
+   */
+  function findLigandInstance(model, compId) {
+    if (!model || !compId) return null;
+    let atoms;
+    try { atoms = model.selectedAtoms({ resn: compId }) || []; } catch (e) { return null; }
+    if (!atoms.length) return null;
+    const a = atoms[0];
+    return {
+      chain: a.chain,
+      resi: a.resi,
+      copies: new Set(atoms.map((x) => `${x.chain}:${x.resi}`)).size,
+    };
+  }
+
+  /** The atoms of one copy of a ligand, never every copy of it. */
+  function ligandInstanceAtoms(model, compId, instance) {
+    if (!model || !compId) return [];
+    if (instance && instance.chain != null && instance.resi != null) {
+      try {
+        const sel = model.selectedAtoms({ resn: compId, chain: instance.chain, resi: instance.resi });
+        if (sel && sel.length) return sel;
+      } catch (e) { /* fall back to the residue-name selection */ }
+    }
+    try { return model.selectedAtoms({ resn: compId }) || []; } catch (e) { return []; }
+  }
+
+  function computeLigandProperties(compId, instance) {
     const model = state.models[state.currentPdbIndex];
     if (!model) return null;
-    let atoms;
-    try { atoms = model.selectedAtoms({ resn: compId }); } catch (e) { return null; }
+    const atoms = ligandInstanceAtoms(model, compId, instance);
     if (!atoms || !atoms.length) return null;
 
-    let heavy = 0, c = 0, n = 0, o = 0, s = 0, halogens = 0;
+    let heavy = 0, c = 0, n = 0, o = 0, halogens = 0;
     const aromRings = new Set();
+    const composition = {};
     for (const a of atoms) {
-      const el = (a.elem || "").toUpperCase();
+      // PDB files write the element column in capitals ("FE", "CL"); the
+      // Chemical Component Dictionary writes it properly ("Fe", "Cl").
+      // Canonicalise both sides or every metal looks like a different
+      // element.
+      const el = canonicalElement(a.elem);
       if (el === "H") continue;
       heavy++;
+      composition[el] = (composition[el] || 0) + 1;
       if (el === "C") { c++; if (a.bond === "ar" || a.aromatic) aromRings.add(a.resi + ":" + a.chain); }
       else if (el === "N") n++;
       else if (el === "O") o++;
-      else if (el === "S") s++;
-      else if (el === "F" || el === "CL" || el === "BR" || el === "I") halogens++;
+      else if (el === "F" || el === "Cl" || el === "Br" || el === "I") halogens++;
+      // Sulfur and every other element are counted in the composition, which
+      // is what the molecular weight is computed from.
     }
     if (!heavy) return null;
 
-    const mw = c * 12.011 + n * 14.007 + o * 15.999 + s * 32.06 + halogens * 78.9;
+    // Mass per element rather than a lumped "heavy atom" average: the
+    // halogens differ from one another by more than a factor of three, and
+    // the CCD comparison in the drug panel depends on this being right.
+    const mass = molecularWeight(composition);
+    const mw = mass.mw;
     const hbd = Math.max(0, n);           // simplified: one donor per N
     const hba = o + n;                     // simplified: O and N are acceptors
     const tpsa = o * 20.23 + n * 25.78;    // Ertl fragment contributions
@@ -3517,13 +4023,13 @@
     const veberPass = rotb <= 10 && tpsa <= 140;
 
     return {
-      heavy, mw, hbd, hba, tpsa, logp, rotb, lipinskiPass, veberPass,
-      formula: `C${c} H? N${n} O${o}${s ? " S" + s : ""}${halogens ? " Hal" + halogens : ""}`,
+      heavy, mw, hbd, hba, tpsa, logp, rotb, lipinskiPass, veberPass, composition,
+      formula: formatFormula(composition),
     };
   }
 
   function renderLigandProperties(l) {
-    const props = computeLigandProperties(l.compId);
+    const props = computeLigandProperties(l.compId, l.instance);
     if (!props) {
       dom.ligandPropStatus.textContent = "Could not read atoms for this ligand.";
       dom.propGrid.innerHTML = "";
@@ -3574,8 +4080,9 @@
     let ligAtoms;
     let protAtoms;
     try {
-      ligAtoms = model.selectedAtoms({ resn: lig.compId });
-      protAtoms = model.selectedAtoms({ not: { resn: lig.compId } });
+      ligAtoms = ligandInstanceAtoms(model, lig.compId, lig.instance);
+      const ligIdx = new Set(ligAtoms.map((a) => a.index));
+      protAtoms = model.selectedAtoms({}).filter((a) => !ligIdx.has(a.index));
     } catch (e) {
       dom.hbondStatus.textContent = "Could not read model atoms.";
       return;
@@ -3665,7 +4172,7 @@
     const model = state.models[state.currentPdbIndex];
     if (model) {
       try {
-        const ligAtoms = model.selectedAtoms({ resn: lig.compId });
+        const ligAtoms = ligandInstanceAtoms(model, lig.compId, lig.instance);
         const byKey = new Map();
         for (const la of ligAtoms) {
           const k = `${la.chain}:${la.resi}:${la.atom}`;
@@ -4043,11 +4550,22 @@
 
     await loadProtein(initialProteinId);
     if (urlState.pdbIndex > 0) {
-      // Switch to that PDB state if available
+      // Restore the requested state. The share link promises to reproduce the
+      // exact view, and the state is part of that view: the library entries
+      // with two structures (T/R haemoglobin, open/closed adenylate kinase)
+      // are only half the story without it. The parameter used to be parsed
+      // and then dropped, so every shared link to a second state silently
+      // showed the first one.
       const protein = state.currentProtein;
-      if (protein && urlState.pdbIndex < protein.pdbIds.length) {
-        // Trajectory proteins support state switching via tour action mechanism;
-        // for non-trajectory, ignore.
+      if (protein && urlState.pdbIndex < protein.pdbIds.length &&
+          state.models[urlState.pdbIndex]) {
+        state.currentPdbIndex = urlState.pdbIndex;
+        updateStateBadge(urlState.pdbIndex);
+        applyAllStyles();
+        state.viewer.render();
+        // The metadata, the ligand list and the drug profile all describe
+        // one structure, so they have to be re-read for the new one.
+        loadStructureMetadata();
       }
     }
   }

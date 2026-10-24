@@ -403,6 +403,22 @@
         </div>
 
         <div class="control-section">
+          <h3>Drug Discovery</h3>
+          <p class="muted small">
+            Asks whether this structure is a target: pulls the target's disease
+            associations, known drugs and tractability from Open Targets, the
+            measured potency of the bound ligand from BindingDB via RCSB, and
+            checks the detected pockets against the ligand the crystallography
+            actually placed.
+          </p>
+          <div class="highlight-actions">
+            <button class="btn btn-secondary" id="btn-fetch-drug-profile">💊 Fetch drug profile</button>
+            <button class="btn btn-ghost" id="btn-clear-drug-profile">Clear</button>
+          </div>
+          <div class="analysis-status muted small" id="drug-status">No drug profile loaded.</div>
+        </div>
+
+        <div class="control-section">
           <h3>Pockets & Ligand Contacts</h3>
           <p class="muted small">
             Detects solvent-excluded surface cavities (alpha-sphere grid scan) and, for any
@@ -650,6 +666,7 @@
   <script src="src/expression.js"></script>
   <script src="src/validate.js"></script>
   <script src="src/annotations.js"></script>
+  <script src="src/drug.js"></script>
 
   <!-- App code -->
   <script src="app.js"></script>

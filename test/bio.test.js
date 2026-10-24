@@ -53,7 +53,7 @@ vm.runInThisContext(fs.readFileSync(path.join(ROOT, "data/proteins.js"), "utf8")
 
 // The extracted pure modules publish themselves on the PFE namespace and must
 // be loaded before app.js, which destructures them.
-for (const m of ["seq", "geometry", "pockets", "colors", "variants", "expression", "validate", "annotations"]) {
+for (const m of ["seq", "geometry", "pockets", "colors", "variants", "expression", "validate", "annotations", "drug"]) {
   vm.runInThisContext(fs.readFileSync(path.join(ROOT, "src", `${m}.js`), "utf8"),
     { filename: `src/${m}.js` });
 }

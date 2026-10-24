@@ -789,14 +789,132 @@ never reaches, and no assertion covering the unhappy path.
 
 ---
 
-## 11. Verification
+## 11. Addendum — drug discovery, and the defects it exposed
+
+### 11.1 What was added
+
+A **Drug Discovery** panel in the Tools section. It answers "is this
+structure a drug target, and is the site the drug binds actually a pocket?",
+using sources that are independent of each other:
+
+| Fact | Source | Why it is independent |
+|---|---|---|
+| Disease associations, known drugs, tractability | Open Targets GraphQL | a curated target-level database, not the structure |
+| Measured potency of the bound ligand | `rcsb_binding_affinity` (BindingDB via RCSB) | an assay measurement, not a computed property |
+| Authoritative composition and mass of the ligand | Chemical Component Dictionary | the deposited reference record |
+| Where the ligand actually sits | the crystallography | the experiment, not the detector |
+
+The cross-validation at the bottom of the panel is deliberately built so it
+can fail:
+
+1. **The pocket finder never sees the ligand.** The detector runs on the
+   apo protein — the ligand is removed from the atom cloud before the scan
+   and overlaid afterwards. If the top pocket then contains the crystallographic
+   ligand, the detector and the experiment agree. If the ranking had preferred
+   the ligand's pocket, the check would have been circular.
+2. **The binding site comes from the contact set, not from the pocket.** The
+   residues within 4 Å of the ligand are computed from the ligand's position;
+   a pocket counts as the site only if it covers those residues.
+3. **The app's own arithmetic is checked against the dictionary.** The model
+   has no hydrogens, so the molecular weight is compared with the hydrogen
+   count added back. Element composition, heavy-atom count and mass are three
+   separate checks on three separate readings of the same atoms.
+
+On the two structures where this can be run against a known answer, it agrees
+completely:
+
+| Structure | Ligand | Pocket finder | Binding-site residues | Composition | Heavy atoms | Mass |
+|---|---|---|---|---|---|---|
+| 1M17 EGFR | erlotinib (AQ4) | 100 % of the ligand's atoms | 15 / 15 | identical | 29 vs 29 | 393.4 vs 393.4 Da |
+| 6OIM KRAS G12C | sotorasib (MOV) | 100 % | 16 / 18 | identical | 41 vs 41 | 562.6 vs 562.6 Da |
+| 1HVR HIV-1 protease | cyclic urea (XK2) | 100 % | 23 / 23 | identical | 46 vs 46 | 606.8 vs 606.8 Da |
+| 2DN2 haemoglobin | haem (HEM) | 100 % | 18 / 18 | identical | 43 vs 43 | 616.5 vs 616.5 Da |
+
+Every one of the thirteen library structures was then run through the whole
+panel in a real browser. No console errors; the surface ions (calcium,
+chloride, zinc, sulphate) are correctly reported as *not* in a pocket, which
+is the honest answer rather than a pass.
+
+### 11.2 The defects this exposed
+
+The feature was only worth building because using it found bugs that reading
+the code had not.
+
+- **The pocket detector had never worked.** The heavy-atom selection used
+  `{ elem: { not: "H" } }`. 3Dmol only understands `not` as a *top-level*
+  boolean operator; a nested spec is compared literally against the element
+  string and matches nothing. Every run ended in "No heavy atoms in
+  structure." The pocket work had only ever been validated in standalone
+  dry-run scripts, never through the app. `{ not: { elem: "H" } }` is the
+  correct spelling.
+
+- **The detector was scoring the wrong thing.** It ran on the protein *with*
+  the ligand in place, so the cavity it was looking for was filled by the
+  very molecule whose binding site was being tested. It also ranked pockets
+  by ligand occupancy, which made the cross-validation circular by
+  construction. It now runs apo and ranks by volume alone.
+
+- **Pocket volumes were systematically wrong.** The density gates keep only
+  the voxels near the walls of a void — a voxel in the middle of a big cavity
+  has too few atoms near it to clear the wall count — so the surviving count
+  under-estimates the cavity. The EGFR site, which holds a 393 Da drug, was
+  reported as 118 Å³. The cavity is now flood-filled from its own voxels
+  (bounded to the pocket's neighbourhood, because a protein's empty space is
+  one connected sponge), and the same site measures 546 Å³.
+
+- **Element symbols were compared in the wrong case.** A PDB file writes its
+  element column in capitals ("FE", "CA", "CL"); the Chemical Component
+  Dictionary writes them properly ("Fe", "Ca", "Cl"). Every metal looked
+  like a different element, so the calcium ion in calmodulin failed the
+  composition check and reported a molecular weight of 0.
+
+- **Ligands were counted by residue name, not by molecule.** Haemoglobin has
+  four haems; the app read all 172 atoms and compared them against the
+  dictionary's 43 for one molecule. The drug panel now resolves a single
+  copy of the ligand and works with that.
+
+- **The selected ligand survived a protein change.** Switching proteins left
+  the previous structure's ligand active, so the new structure was
+  cross-validated against the old one's ligand.
+
+- **Two library entries pointed at the wrong structure.** "KRAS G12C ·
+  Sotorasib" pointed at **5VQ2**, which is wild-type KRAS with GTP — no
+  sotorasib, no mutation; the right structure is **6OIM**, where the `LINK`
+  record joins SG CYS A 12 to C25 of AMG 510. "HIV-1 Protease · Apo" pointed
+  at **2PC1**, which is a bacterial acetyltransferase from *Streptococcus
+  agalactiae*; the right structure is **3IXO**, the uncomplexed wild-type
+  dimer at 1.7 Å. The HIV inhibitor highlight named IHV, a compound that is
+  not in the structure; the inhibitor in 1HVR is XK2.
+
+- **The p53 DNA highlight matched nothing.** It asked for residue name "DNA";
+  the two strands are named DA and DT. Highlights can now name several
+  residues.
+
+- **A shared link to the second state of a protein silently showed the
+  first.** The `i` URL parameter was parsed and then dropped, and the
+  metadata was fetched only for the first structure, so the ligand list and
+  the header could describe different structures.
+
+- **Two metadata loads could interleave.** Switching state started a second
+  metadata fetch while the first was still in flight. The metadata is now
+  assembled locally and handed over in one go, and a load that has been
+  superseded is discarded.
+
+- **The flood fill could walk out of its lattice.** The flat cell index is
+  not injective outside the lattice, so a fill with no limits box kept
+  filling aliased cells until the safety cap. The lattice extent is now
+  derived from the array length and enforced.
+
+---
+
+## 12. Verification
 
 Everything in this document was checked, not assumed.
 
 | Check | Method | Result |
 |---|---|---|
-| Syntax of every JS file | `npm run check` (`node --check` × 8) | pass |
-| Unit + behavioural suites | `npm test` | **225 passed, 0 failed** (69 analysis + 81 colour + 69 bio + 6 network) |
+| Syntax of every JS file | `npm run check` (`node --check` × 21) | pass |
+| Unit + behavioural suites | `npm test` | **1,099 assertions, 0 failed** (75 analysis + 133 expression + 197 validation + 126 annotation + 77 variant + 88 colour + 69 bio + 208 drug + 118 pocket geometry + 8 network) |
 | Pocket-function equivalence | Old `app.js` vs `src/pockets.js` on real 1M17 (2,511 atoms) | 0 mismatches over 1,848 probes |
 | Drug-site recall preserved | Enclosure fraction at the erlotinib site, 1M17 | 121/144 above the 0.75 threshold |
 | Off-site specificity preserved | Off-drug probe points, 1M17 | 3/8 above threshold (rejected as before) |
@@ -805,6 +923,8 @@ Everything in this document was checked, not assumed.
 | DOM bindings intact | All 116 `$(...)` ids cross-checked against `index.html` | 116/116 present, 0 missing |
 | Lint baseline | ESLint 9, correctness rules, `app.js` + `src/` + `data/` | 0 errors, 34 warnings, 0 genuine undefined refs |
 | Live page load | Real browser, local server | 0 console errors, 13 proteins rendered, 3Dmol initialised, modules callable |
+| Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 5/5 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
+| Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
 | Deployment | GitHub Actions on push to `main` | green |
 
 ---
