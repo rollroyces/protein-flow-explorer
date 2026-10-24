@@ -793,14 +793,24 @@
       } else {
         // Fallback: AlphaFold
         showLoading(`No PDB — fetching AlphaFold model for ${accession}…`);
-        const afUrl = `https://alphafold.ebi.ac.uk/files/AF-${accession}-F1-model_v4.pdb`;
-        const afr = await net(afUrl);
-        if (!afr.ok) {
+        // AlphaFold retires old model versions: the v4 files were removed
+        // and v6 is current. Try the newest first and fall back through the
+        // previous ones, so the lookup survives the next retirement rather
+        // than failing with a bare 404.
+        let afData = null;
+        for (const ver of ["v6", "v5", "v4"]) {
+          const afr = await net(
+            `https://alphafold.ebi.ac.uk/files/AF-${accession}-F1-model_${ver}.pdb`);
+          if (!afr.ok) continue;
+          const text = await afr.text();
+          if (text && text.includes("ATOM")) { afData = text; break; }
+        }
+        if (!afData) {
           hideLoading();
           showCustomError(`No PDB or AlphaFold model for ${accession}.`);
           return;
         }
-        const data = await afr.text();
+        const data = afData;
         state.customCounter++;
         const id = `custom-alphafold-${accession}`;
         const protein = makeCustomProtein({
