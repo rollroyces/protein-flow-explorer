@@ -224,6 +224,11 @@ const PROTEINS = [
     name: "Collagen II · C-propeptide",
     pdbIds: ["1BMP"],
     stateLabels: ["Triple helix"],
+    // 1BMP's PDB title says "bone morphogenetic protein 7" and its UniProt
+    // cross-reference points at BMP-7, but the structure is the type II
+    // collagen C-propeptide trimer -- the long-standing legacy annotation
+    // that mislabelled it. State the accession this entry is actually about.
+    uniprot: "P02452",
     summary: "Hallmark of cartilage — most abundant protein in chondrocytes",
     description:
       "Type II collagen (COL2A1) is the defining matrix protein of hyaline cartilage, secreted by chondrocytes. It forms a triple-helical structure with repeating Gly-X-Y motifs, where X is often Pro and Y is often Hyp (hydroxyproline). The C-propeptide trimerizes first and nucleates the triple helix. Mutations cause spondyloepiphyseal dysplasia and Stickler syndrome. The 1BMP structure shows the C-propeptide trimer that initiates fibril assembly.",
@@ -242,6 +247,10 @@ const PROTEINS = [
     name: "Aggrecan G1 Domain",
     pdbIds: ["1TDQ"],
     stateLabels: ["G1 immunoglobulin fold"],
+    // 1TDQ is a complex of aggrecan with tenascin-R. The larger entity is
+    // tenascin-R, so the automatic mapping picks the wrong protein; state the
+    // accession this entry is actually about.
+    uniprot: "P07897",
     summary: "Cartilage proteoglycan — gives cartilage its compressive resistance",
     description:
       "Aggrecan is the major proteoglycan of cartilage, produced by chondrocytes. It carries ~100 chondroitin sulfate and keratan sulfate chains that attract water, giving cartilage its resistance to compression. The G1 domain binds hyaluronic acid to form large aggregates trapped in the collagen-II network. Loss of aggrecan is the hallmark of osteoarthritis.",

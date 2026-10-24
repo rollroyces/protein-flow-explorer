@@ -1771,20 +1771,28 @@
       if (!r.ok) return null;
       const j = await r.json();
       const entities = j.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
-      // Iterate entities to find a UniProt accession
+      // Every polymer entity is examined, and the one with the LONGEST
+      // UniProt-mapped sequence wins. Taking the first entity that had a
+      // reference at all got the wrong protein, or none: p53's entry 1TUP
+      // has three entities and the UniProt reference sits on the third, so
+      // p53 had no accession and neither the MSA nor the expression panel
+      // could run.
+      let best = null;
       for (const eid of entities) {
         try {
           const er = await net(`https://data.rcsb.org/rest/v1/core/polymer_entity/${pdbId.toLowerCase()}/${eid}`);
           if (!er.ok) continue;
           const ej = await er.json();
           const refs = ej.rcsb_polymer_entity_container_identifiers?.reference_sequence_identifiers || [];
-          for (const ref of refs) {
-            if (ref.database_accession && ref.database_name === "UniProt") {
-              return ref.database_accession;
-            }
-          }
+          const acc = (refs.find((ref) =>
+            ref.database_accession && ref.database_name === "UniProt") || {}).database_accession;
+          if (!acc) continue;
+          const seq = (ej.entity_poly || {}).pdbx_seq_one_letter_code_can || "";
+          const len = seq.replace(/\s+/g, "").length;
+          if (!best || len > best.len) best = { acc, len };
         } catch (e) { /* skip */ }
       }
+      if (best) return best.acc;
     } catch (e) { /* skip */ }
     return null;
   }
@@ -1803,7 +1811,9 @@
 
     const job = (async () => {
       try {
-        const acc = await fetchRcsbUniprotMapping(pdbId);
+        const acc = (state.currentProtein && state.currentProtein.uniprot) ||
+          await fetchRcsbUniprotMapping(pdbId);
+        const upInfo = acc ? await fetchUniProtInfo(acc) : null;
         if (!acc) {
           dom.conservationStatus.textContent = "No UniProt mapping found for this PDB.";
           return;
@@ -1821,12 +1831,32 @@
         if (!canonical) throw new Error("Empty canonical sequence");
 
         dom.conservationStatus.textContent = "Fetching homologs…";
-        // Homologs via UniProt search: by organism (human) and protein name keywords
-        const protName = state.currentProtein.name.split(/[·•:()-]/)[0].trim();
-        const searchUrl = `https://rest.uniprot.org/uniprotkb/search?query=reviewed:true+AND+organism_id:9606+AND+name:${encodeURIComponent(protName)}&format=fasta&size=10`;
-        const sr = await net(searchUrl);
-        if (!sr.ok) throw new Error("Homolog search failed");
-        const homologFasta = await sr.text();
+        // Homologs via UniProt search. Two things matter here:
+        //   - the field is `protein_name`, not `name`. UniProt dropped `name`
+        //     as a search field, and the old query answered 400 for every
+        //     protein, so the MSA never ran.
+        //   - the term is the canonical UniProt protein name. The app's
+        //     display name is a teaching label ("Hen Egg-White Lysozyme",
+        //     "Sperm Whale Myoglobin") and matches nothing.
+        // The name is matched unquoted first, so the whole family comes back
+        // -- "Hemoglobin subunit alpha" quoted returns one sequence, unquoted
+        // returns ten. The quoted phrase is the fallback for names whose
+        // tokens do not usefully AND together.
+        const canonicalName = (upInfo && upInfo.proteinName) || null;
+        const fallbackName = state.currentProtein.name.split(/·/)[0].trim();
+        const term = canonicalName || fallbackName;
+        const searchUrl = (q) =>
+          `https://rest.uniprot.org/uniprotkb/search?query=` +
+          `reviewed:true+AND+organism_id:9606+AND+protein_name:` +
+          `${encodeURIComponent(q)}&format=fasta&size=10`;
+        let homologFasta = "";
+        for (const q of [term, `"${term}"`]) {
+          const sr = await net(searchUrl(q));
+          if (!sr.ok) continue;
+          const text = await sr.text();
+          if (parseFastaSequences(text).length >= 2) { homologFasta = text; break; }
+          if (!homologFasta) homologFasta = text;
+        }
         const homologs = parseFastaSequences(homologFasta);
 
         const allSeqs = [canonical, ...homologs].slice(0, 10);
@@ -1914,12 +1944,22 @@
       return state._uniprotInfo;
     }
     try {
-      const r = await net(`https://rest.uniprot.org/uniprotkb/${accession}?fields=gene_names,sequence`);
+      const r = await net(
+        `https://rest.uniprot.org/uniprotkb/${accession}?fields=gene_names,sequence,protein_name`);
       if (!r.ok) return null;
       const j = await r.json();
       const info = {
         accession,
-        gene: (j.genes && j.genes[0] && j.genes[0].geneName && j.genes[0].geneName.value) || null,
+        gene: (j.genes && j.genes[0] && j.genes[0].geneName &&
+               j.genes[0].geneName.value) || null,
+        // The canonical UniProt protein name, e.g. "Hemoglobin subunit alpha".
+        // The conservation search needs it: the app's own display name is a
+        // teaching label ("Sperm Whale Myoglobin"), not a database name.
+        proteinName:
+          (j.proteinDescription &&
+            j.proteinDescription.recommendedName &&
+            j.proteinDescription.recommendedName.fullName &&
+            j.proteinDescription.recommendedName.fullName.value) || null,
         sequence: (j.sequence && j.sequence.value) || "",
       };
       state._uniprotInfo = info;
@@ -3266,7 +3306,9 @@
       // Chains and UniProt accession (SIFTS) for the cross-reference panel.
       const chains = [];
       const polymerIds = entry.rcsb_entry_container_identifiers?.polymer_entity_ids || [];
-      let uniprot = null;
+      // A curated entry may state its own accession, because the PDB's
+      // cross-reference can be legacy or simply point at a binding partner.
+      let uniprot = (protein && protein.uniprot) || null;
       const sifts = [];
       for (const eid of polymerIds) {
         try {
