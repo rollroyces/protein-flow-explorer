@@ -35,7 +35,7 @@
           classifyImpactTier, classifyOncogenicity, significanceRank, rarityLabel,
           buildUniprotMap, mergeByChange } = PFE.variants;
   const { validatePdbId, validateGeneSymbol, validateUniprotAccession,
-          validateClinVarRecord, validateGnomadResponse } = PFE.validate;
+          validateClinVarRecord, validateGnomadResponse, validateFasta } = PFE.validate;
   const { parseMedianExpression, groupByCompartment, summarizeExpression,
           logExpression, EXPRESSION_TPM_MAX } = PFE.expression;
 
@@ -1814,6 +1814,9 @@
         const fr = await net(fastaUrl);
         if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
         const fastaText = await fr.text();
+        // A proxy or an error page can come back with a 200 and an HTML body.
+        const fastaCheck = validateFasta(fastaText, "UniProt FASTA response");
+        if (!fastaCheck.ok) throw new Error(fastaCheck.error);
         const canonical = parseFastaSequences(fastaText)[0] || "";
         if (!canonical) throw new Error("Empty canonical sequence");
 

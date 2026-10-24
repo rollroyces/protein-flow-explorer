@@ -48,7 +48,7 @@ check("no ES module syntax", !/^\s*(import|export)\s/m.test(SRC));
 check("every expected member is exported",
   ["CODES", "validatePdbId", "validateGeneSymbol", "validateUniprotAccession",
    "validateClinVarRecord", "validateClinVarRecords", "validateGnomadResponse",
-   "validateRcsbEntity", "validateUniProtResponse", "validateAlphaFoldFasta",
+   "validateRcsbEntity", "validateUniProtResponse", "validateFasta",
    "validateList"].every((k) => typeof V[k] === "function" || V[k] === V.CODES));
 check("the error codes are the documented ones",
   V.CODES.INVALID === "invalid" && V.CODES.INVALID_SHAPE === "invalid_shape" &&
@@ -444,25 +444,25 @@ check("a missing geneName.value is rejected",
   !V.validateUniProtResponse({ genes: [{ geneName: {} }], sequence: UNIPROT.sequence }).ok);
 
 // ------------------------------------------------------------------- FASTA
-console.log("\nAlphaFold FASTA responses");
+console.log("\nFASTA responses");
 check("a normal FASTA is valid",
-  V.validateAlphaFoldFasta(">sp|P00533|EGFR_HUMAN\nMRPSGTAGAALLALLAALCPASR\nALEEKKVCQGT\n").ok);
+  V.validateFasta(">sp|P00533|EGFR_HUMAN\nMRPSGTAGAALLALLAALCPASR\nALEEKKVCQGT\n").ok);
 check("a single-line FASTA is valid",
-  V.validateAlphaFoldFasta(">sp|P00533|EGFR_HUMAN\nMRPSGTAGAALL\n").ok);
-check("a null payload is rejected", !V.validateAlphaFoldFasta(null).ok);
-check("an array payload is rejected", !V.validateAlphaFoldFasta([]).ok);
-check("a number payload is rejected", !V.validateAlphaFoldFasta(42).ok);
-check("an empty body is rejected", !V.validateAlphaFoldFasta("").ok);
-check("a whitespace-only body is rejected", !V.validateAlphaFoldFasta("   \n  ").ok);
+  V.validateFasta(">sp|P00533|EGFR_HUMAN\nMRPSGTAGAALL\n").ok);
+check("a null payload is rejected", !V.validateFasta(null).ok);
+check("an array payload is rejected", !V.validateFasta([]).ok);
+check("a number payload is rejected", !V.validateFasta(42).ok);
+check("an empty body is rejected", !V.validateFasta("").ok);
+check("a whitespace-only body is rejected", !V.validateFasta("   \n  ").ok);
 check("an HTML error page is rejected",
-  !V.validateAlphaFoldFasta("<!DOCTYPE html><html><body>404</body></html>").ok);
-check("the HTML error says so", /HTML/.test(V.validateAlphaFoldFasta("<html>404</html>").error));
+  !V.validateFasta("<!DOCTYPE html><html><body>404</body></html>").ok);
+check("the HTML error says so", /HTML/.test(V.validateFasta("<html>404</html>").error));
 check("text with no header line is rejected",
-  !V.validateAlphaFoldFasta("MRPSGTAGAALLALLAALCPASR\n").ok);
+  !V.validateFasta("MRPSGTAGAALLALLAALCPASR\n").ok);
 check("a header with no sequence is rejected",
-  !V.validateAlphaFoldFasta(">sp|P00533|EGFR_HUMAN\n").ok);
+  !V.validateFasta(">sp|P00533|EGFR_HUMAN\n").ok);
 check("a sequence containing a digit is rejected",
-  !V.validateAlphaFoldFasta(">sp|SEQ\nMRPS1\n").ok);
+  !V.validateFasta(">sp|SEQ\nMRPS1\n").ok);
 
 // ------------------------------------------------------------------ batches
 console.log("\nBatch validation");
@@ -513,7 +513,7 @@ const MESSAGES = [
   V.validateGnomadResponse(gnomadRateLimited).error,
   V.validateRcsbEntity({}).error,
   V.validateUniProtResponse({}).error,
-  V.validateAlphaFoldFasta("").error,
+  V.validateFasta("").error,
 ];
 check("every message is a non-empty string",
   MESSAGES.every((m) => typeof m === "string" && m.length > 10));

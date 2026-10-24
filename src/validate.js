@@ -685,7 +685,7 @@
   }
 
   /**
-   * Validate an AlphaFold FASTA response.
+   * Validate a FASTA response (UniProt, AlphaFold or any other source).
    *
    * The body has to be FASTA text that `parseFastaSequences` (in
    * src/seq.js) can read: a header line starting with ">", and at
@@ -697,23 +697,24 @@
    * @param {string} text  the response body
    * @returns {{ok: true}|{ok: false, code: string, error: string}}
    */
-  function validateAlphaFoldFasta(text) {
+  function validateFasta(text, source) {
+    const what = source || "FASTA response";
     if (typeof text !== "string") {
       return fail(CODES.INVALID_SHAPE,
-        `AlphaFold FASTA response must be text, got ${describeType(text)}.`);
+        `${what} must be text, got ${describeType(text)}.`);
     }
     const body = text.trim();
     if (!body) {
-      return fail(CODES.INVALID_SHAPE, "AlphaFold FASTA response is empty.");
+      return fail(CODES.INVALID_SHAPE, `${what} is empty.`);
     }
     if (/^</.test(body) || /<!DOCTYPE/i.test(body)) {
       return fail(CODES.INVALID_SHAPE,
-        "AlphaFold FASTA response is an HTML page, not FASTA.");
+        `${what} is an HTML page, not FASTA.`);
     }
     const lines = body.split(/\r?\n/);
     if (!lines[0].startsWith(">")) {
       return fail(CODES.INVALID_SHAPE,
-        "AlphaFold FASTA response has no '>' header line.");
+        `${what} has no '>' header line.`);
     }
     let records = 0;
     let residues = 0;
@@ -729,15 +730,15 @@
       if (!seq) continue;
       if (!/^[A-Za-z*-]+$/.test(seq)) {
         return fail(CODES.INVALID_SHAPE,
-          "AlphaFold FASTA response contains a character that is not an amino acid.");
+          `${what} contains a character that is not an amino acid.`);
       }
       residues += seq.length;
     }
     if (records === 0) {
-      return fail(CODES.INVALID_SHAPE, "AlphaFold FASTA response has no FASTA record.");
+      return fail(CODES.INVALID_SHAPE, `${what} has no FASTA record.`);
     }
     if (residues === 0) {
-      return fail(CODES.INVALID_SHAPE, "AlphaFold FASTA response has an empty sequence.");
+      return fail(CODES.INVALID_SHAPE, `${what} has an empty sequence.`);
     }
     return pass();
   }
@@ -823,7 +824,7 @@
     validateGnomadResponse,
     validateRcsbEntity,
     validateUniProtResponse,
-    validateAlphaFoldFasta,
+    validateFasta,
     validateList,
   };
 
