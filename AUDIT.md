@@ -731,6 +731,36 @@ worse than no fixture**, because it converts a defect into an enforced
 invariant. Fixtures for third-party payloads must be captured from the live
 response, character for character, including whether a field is a string.
 
+### Two headline features that had never worked
+
+Both were found by clicking the buttons in a browser rather than by reading
+the code.
+
+- **The conservation MSA never ran.** The homolog query asked UniProt for
+  `name:Hemoglobin`, and UniProt had dropped `name` as a search field — the
+  request answered HTTP 400 and the panel read "MSA failed: Homolog search
+  failed" for every protein. The field is `protein_name`, and the term has to
+  be the canonical UniProt protein name rather than the app's own display
+  label ("Hen Egg-White Lysozyme"), matched unquoted so the family comes back
+  rather than one subunit. The UniProt accession was also taken from the
+  first polymer entity that had one, which for p53 — whose reference sits on
+  the third of three entities — meant p53 had no accession at all. A curated
+  entry may now state its own accession, which two of them need: 1BMP is
+  titled "bone morphogenetic protein 7" but is the type II collagen
+  C-propeptide trimer, and 1TDQ is an aggrecan–tenascin-R complex whose
+  larger entity is the wrong protein.
+
+- **The AlphaFold fallback fetched a retired file version.** It asked for
+  `AF-<accession>-F1-model_v4.pdb`; AlphaFold has removed the v4 files, so
+  every gene with no experimental PDB structure — the exact case the
+  fallback exists for — failed. It now tries v6 first and falls back
+  through v5 and v4.
+
+The pattern is the same as the colour bug and the nwAlign hang: **a code path
+that only a user exercises, with no assertion behind it, rots silently.**
+Every one of these had a green test suite. The suite was not wrong about
+what it asserted; it simply never asserted these paths.
+
 ### Two more defects found while building the variant panel
 
 Both were found by using the code, not by reading it.
