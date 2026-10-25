@@ -63,7 +63,7 @@ const probe = src.replace(/\n\}\)\(\);\s*$/,
   "\n  global.__PROBE__ = { NET_TIMEOUT_MS, NET_RETRIES, newNetworkGeneration,\n" +
   "    isAbort, currentNetGeneration: () => netGeneration,\n" +
   "    midPoint, computeDistance, computeAngle,\n" +
-  "    computeDihedral, progressiveMsa, conservationScores, nwAlign,\n" +
+  "    computeDihedral, progressiveMsa, conservationProfile, nwAlign,\n" +
   "    resolveColor, chainColorFunc, domainColorFunc, state,\n" +
   "    STRUCT_CHAIN_PALETTE, isPlanarAromatic,\n" +
   "    isHydrophobicResidue, isIonic, extractPdbTitle, firstRefineStat,\n" +
@@ -186,7 +186,7 @@ const fam = [
 ];
 const m = P.progressiveMsa(fam);
 check("all rows aligned",  m.aligned.every((r) => r.length === m.consensus.length));
-const sc = P.conservationScores(m);
+const sc = P.conservationProfile(m).identity;
 check("scores in [0,1]",   sc.every((v) => v >= 0 && v <= 1));
 check("no NaN",            sc.every((v) => !Number.isNaN(v)));
 const identical = P.nwAlign("ACDEFGHIK", "ACDEFGHIK");

@@ -24,7 +24,8 @@
   // network or viewer dependency, so they can be unit-tested directly.
   // Destructuring keeps every existing call site unchanged.
   const { parseSequenceFromPDB, parseFastaSequences, nwAlign, progressiveMsa,
-          conservationScores, buildResidueIndex, AA3TO1 } = PFE.seq;
+          conservationProfile, parseDbrefs, canonicalColumnMap,
+          sequenceOffset, buildResidueIndex, AA3TO1 } = PFE.seq;
   const { midPoint, computeDistance, computeAngle, computeDihedral,
           computePerResidueRmsd } = PFE.geometry;
   const { buildAtomHash, countAtomsNear, atomsNear, floodFillVoid,
@@ -40,8 +41,8 @@
   const { parseMedianExpression, groupByCompartment, summarizeExpression,
           logExpression, EXPRESSION_TPM_MAX } = PFE.expression;
   const { druggabilityVerdict, validatePocketsAgainstLigand, crossValidateLigand,
-          contactResidues, pocketResidueRecall, molecularWeight, formatFormula,
-          canonicalElement,
+          contactResidues, pocketResidueRecall, pocketConservation, siteConservationEdge,
+          molecularWeight, formatFormula, canonicalElement,
           formatPotency, summariseAffinity, summariseTarget, matchDrugToLigand } = PFE.drug;
 
   // ====== GLOBAL STATE ======
@@ -867,6 +868,12 @@
     state.ligands = [];
     state.activeLigand = null;
     state.drugProfile = null;
+    // The alignment belongs to the structure too. Leaving the previous
+    // protein's conservation scores on screen would put another protein's
+    // residues on this one's pocket.
+    state.conservation = null;
+    state.conservationJob = null;
+    if (dom.conservationStatus) dom.conservationStatus.textContent = "No conservation loaded.";
     if (dom.drugStatus) dom.drugStatus.textContent = "No drug profile loaded.";
     // Tissue expression is per-gene: leaving the previous gene's data on
     // screen over a different structure would be a different structure's
@@ -1842,7 +1849,128 @@
 
   // Build a PDB-resi → alignment-index map from the PDB ATOM records
 
-  async function loadConservation() {
+  /**
+   * Fetch homologues, align them and score every residue for conservation.
+   *
+   * `applyColors` is false when the caller only wants the numbers - the
+   * drug panel scores pocket conservation, and switching the whole
+   * structure to the conservation colour scheme as a side effect of that
+   * would be a surprise.
+   */
+  /**
+   * Find the protein's own family and a handful of relatives.
+   *
+   * Searching UniProt by the protein's NAME is not a homology search. The
+   * name field is tokenised, so "epidermal growth factor receptor" also
+   * matches EGF, EPS8, GRB7, DNER and the Cripto proteins - proteins that
+   * share words with the name and nothing else. Aligning a kinase domain
+   * against those produced a conservation map with no meaning behind it.
+   *
+   * Every UniProt entry states the family it belongs to ("Belongs to the
+   * EGF receptor subfamily"), and that family is exactly the set of
+   * sequences a conservation score should be measured against: the ERBB
+   * kinases for EGFR, the globins for haemoglobin and myoglobin, p53 and
+   * its relatives for p53.
+   *
+   * When an entry names several families, the smallest one is the most
+   * specific and therefore the right one, so the families are tried in
+   * order of how many members they have.
+   *
+   * @param {string} accession
+   * @returns {Promise<{phrase: string, total: number, accessions: string[]}|null>}
+   */
+  async function fetchFamilyHomologs(accession) {
+    // The family the entry states, and the gene it belongs to. The gene
+    // matters because a protein can have more than one accession: EGFR is
+    // P00533 and Q01279, and including the second one would put the query
+    // protein into its own alignment.
+    let phrases = [];
+    let ownGene = null;
+    try {
+      const r = await net(`https://rest.uniprot.org/uniprotkb/${accession}?fields=cc_similarity,gene_primary`);
+      if (r.ok) {
+        const j = await r.json();
+        ownGene = (j.genes && j.genes[0] && j.genes[0].geneName &&
+                   j.genes[0].geneName.value) || null;
+        for (const c of j.comments || []) {
+          if (c.commentType !== "SIMILARITY") continue;
+          for (const t of c.texts || []) {
+            const text = String(t.value || "");
+            const at = text.indexOf("Belongs to the ");
+            if (at < 0) continue;
+            for (const part of text.slice(at + "Belongs to the ".length).split(/\.\s+/)) {
+              const phrase = part.trim().replace(/\.$/, "");
+              if (phrase) phrases.push(phrase);
+            }
+          }
+        }
+      }
+    } catch (e) { /* no family known */ }
+    if (!phrases.length) return null;
+
+    // Collect the members of a family: one representative per gene, so the
+    // alignment is not dominated by the same protein under several
+    // accessions.
+    const membersOf = async (phrase, humanOnly) => {
+      const q = `reviewed:true AND cc_similarity:"${phrase}"` +
+        (humanOnly ? " AND organism_id:9606" : "");
+      const r = await net(
+        `https://rest.uniprot.org/uniprotkb/search?query=${encodeURIComponent(q)}` +
+        `&format=tsv&fields=accession,gene_primary&size=60`);
+      if (!r.ok) return null;
+      const total = parseInt(r.headers.get("x-total-results") || "0", 10);
+      const rows = (await r.text())
+        .split(/\r?\n/).slice(1).map((l) => l.split("\t")).filter((x) => x[0]);
+      const seen = new Set();
+      const accessions = [];
+      for (const [a, g] of rows) {
+        const gene = (g || "").trim();
+        if (!gene || seen.has(gene)) continue;
+        if (ownGene && gene === ownGene) continue;
+        seen.add(gene);
+        accessions.push(a);
+      }
+      return { total: Number.isFinite(total) ? total : 0, accessions };
+    };
+
+    // The smallest family is the most specific one, so the families the
+    // entry names are ranked by how many members they have. A protein from
+    // another species has no relatives in ours - a phage lysozyme has no
+    // human relatives - so the same families are also collected across
+    // species and used when the human ones come back empty.
+    const humanSets = [];
+    const wideSets = [];
+    for (const phrase of phrases) {
+      try {
+        const m = await membersOf(phrase, true);
+        if (m && m.accessions.length) humanSets.push({ phrase, ...m });
+      } catch (e) { /* try the next family */ }
+      try {
+        const w = await membersOf(phrase, false);
+        if (w && w.accessions.length) wideSets.push({ phrase, ...w });
+      } catch (e) { /* try the next family */ }
+    }
+    if (!humanSets.length && !wideSets.length) return null;
+    humanSets.sort((a, b) => a.total - b.total);
+    wideSets.sort((a, b) => a.total - b.total);
+    const chosen = humanSets.length ? humanSets[0] : wideSets[0];
+
+    // A family of two in one species is too thin to score conservation
+    // with; widen it to the same family across species if it is.
+    if (chosen.accessions.length < 3) {
+      try {
+        const wide = await membersOf(chosen.phrase, false);
+        if (wide && wide.accessions.length > chosen.accessions.length) {
+          return { phrase: chosen.phrase, total: wide.total, accessions: wide.accessions.slice(0, 9) };
+        }
+      } catch (e) { /* keep the narrow set */ }
+    }
+    return { phrase: chosen.phrase, total: chosen.total, accessions: chosen.accessions.slice(0, 9) };
+  }
+
+  async function loadConservation(opts) {
+    const options = opts || {};
+    const applyColors = options.applyColors !== false;
     if (state.conservationJob) return state.conservationJob;
     if (!state._lastPdbText || !state.currentProtein) {
       showCustomError("Load a protein first.");
@@ -1861,71 +1989,163 @@
           dom.conservationStatus.textContent = "No UniProt mapping found for this PDB.";
           return;
         }
-        dom.conservationStatus.textContent = `Fetching canonical sequence (${acc})…`;
-        // UniProt canonical sequence
-        const fastaUrl = `https://rest.uniprot.org/uniprotkb/${acc}.fasta`;
-        const fr = await net(fastaUrl);
-        if (!fr.ok) throw new Error("UniProt FASTA fetch failed");
-        const fastaText = await fr.text();
-        // A proxy or an error page can come back with a 200 and an HTML body.
-        const fastaCheck = validateFasta(fastaText, "UniProt FASTA response");
-        if (!fastaCheck.ok) throw new Error(fastaCheck.error);
-        const canonical = parseFastaSequences(fastaText)[0] || "";
-        if (!canonical) throw new Error("Empty canonical sequence");
+        // Which protein each chain belongs to. A structure can hold more
+        // than one - haemoglobin has an alpha chain and a beta chain, and
+        // they are different proteins - so each gets its own reference
+        // sequence and its own row in the alignment.
+        //
+        // The accession in the file's DBREF record is not always usable: a
+        // UniProt entry can be demerged and the old accession stops
+        // resolving to a sequence (human calmodulin's P62158 is one). The
+        // accession RCSB holds is always current, so it is fetched as well
+        // and used as the fallback.
+        const dbrefs = parseDbrefs(state._lastPdbText);
+        const chainAcc = new Map();
+        for (const d of dbrefs) if (d.db === "UNP") chainAcc.set(d.chain, d.acc);
+        const msaAcc = acc;
+        const wanted = [...new Set([...chainAcc.values(), acc].filter(Boolean))];
+        if (!wanted.length) {
+          dom.conservationStatus.textContent = "No UniProt reference for this structure.";
+          return;
+        }
+
+        const refs = [];
+        for (const a of wanted) {
+          dom.conservationStatus.textContent = `Fetching canonical sequence (${a})…`;
+          const fr = await net(`https://rest.uniprot.org/uniprotkb/${a}.fasta`);
+          if (!fr.ok) continue;
+          const fastaText = await fr.text();
+          // A proxy or an error page can come back with a 200 and an HTML body.
+          const fastaCheck = validateFasta(fastaText, "UniProt FASTA response");
+          if (!fastaCheck.ok) continue;
+          const seq = parseFastaSequences(fastaText)[0] || "";
+          if (seq) refs.push({ acc: a, seq });
+        }
+        if (!refs.length) {
+          dom.conservationStatus.textContent =
+            "The reference sequence could not be read, so conservation is unavailable.";
+          return;
+        }
 
         dom.conservationStatus.textContent = "Fetching homologs…";
-        // Homologs via UniProt search. Two things matter here:
-        //   - the field is `protein_name`, not `name`. UniProt dropped `name`
-        //     as a search field, and the old query answered 400 for every
-        //     protein, so the MSA never ran.
-        //   - the term is the canonical UniProt protein name. The app's
-        //     display name is a teaching label ("Hen Egg-White Lysozyme",
-        //     "Sperm Whale Myoglobin") and matches nothing.
-        // The name is matched unquoted first, so the whole family comes back
-        // -- "Hemoglobin subunit alpha" quoted returns one sequence, unquoted
-        // returns ten. The quoted phrase is the fallback for names whose
-        // tokens do not usefully AND together.
-        const canonicalName = (upInfo && upInfo.proteinName) || null;
-        const fallbackName = state.currentProtein.name.split(/·/)[0].trim();
-        const term = canonicalName || fallbackName;
-        const searchUrl = (q) =>
-          `https://rest.uniprot.org/uniprotkb/search?query=` +
-          `reviewed:true+AND+organism_id:9606+AND+protein_name:` +
-          `${encodeURIComponent(q)}&format=fasta&size=10`;
-        let homologFasta = "";
-        for (const q of [term, `"${term}"`]) {
-          const sr = await net(searchUrl(q));
-          if (!sr.ok) continue;
-          const text = await sr.text();
-          if (parseFastaSequences(text).length >= 2) { homologFasta = text; break; }
-          if (!homologFasta) homologFasta = text;
+        // Homologs come from the protein's own family, not from a search on
+        // its name. See fetchFamilyHomologs for why the name search is not
+        // a homology search. The old name-based fallback is kept for the
+        // entries whose family cannot be established.
+        const family = await fetchFamilyHomologs(msaAcc);
+        let homologs = [];
+        let familyLabel = "";
+        if (family) {
+          familyLabel = family.phrase;
+          dom.conservationStatus.textContent =
+            `Fetching ${family.accessions.length} relatives of the ${family.phrase}…`;
+          const parts = await Promise.all(family.accessions.map(async (a) => {
+            try {
+              const r = await net(`https://rest.uniprot.org/uniprotkb/${a}.fasta`);
+              if (!r.ok) return "";
+              const text = await r.text();
+              return validateFasta(text, "UniProt FASTA response").ok ? text : "";
+            } catch (e) { return ""; }
+          }));
+          homologs = parseFastaSequences(parts.filter(Boolean).join("\n"));
         }
-        const homologs = parseFastaSequences(homologFasta);
+        if (homologs.length < 2) {
+          // Fallback: search by the canonical protein name.
+          const canonicalName = (upInfo && upInfo.proteinName) || null;
+          const fallbackName = state.currentProtein.name.split(/·/)[0].trim();
+          const term = canonicalName || fallbackName;
+          const searchUrl = (q) =>
+            `https://rest.uniprot.org/uniprotkb/search?query=` +
+            `reviewed:true+AND+organism_id:9606+AND+protein_name:` +
+            `${encodeURIComponent(q)}&format=fasta&size=10`;
+          let homologFasta = "";
+          for (const q of [term, `"${term}"`]) {
+            const sr = await net(searchUrl(q));
+            if (!sr.ok) continue;
+            const text = await sr.text();
+            if (parseFastaSequences(text).length >= 2) { homologFasta = text; break; }
+            if (!homologFasta) homologFasta = text;
+          }
+          homologs = parseFastaSequences(homologFasta);
+          familyLabel = "name search";
+        }
 
-        const allSeqs = [canonical, ...homologs].slice(0, 10);
+        const allSeqs = [...refs.map((r) => r.seq), ...homologs].slice(0, 12);
+        // One sequence in the alignment is not a comparison: every position
+        // would score a perfect 1.0 and say nothing.
+        if (allSeqs.length < 2) {
+          dom.conservationStatus.textContent =
+            "No relatives of this protein were found, so its conservation cannot be scored.";
+          return;
+        }
         dom.conservationStatus.textContent = `Aligning ${allSeqs.length} sequences…`;
         const msa = progressiveMsa(allSeqs);
-        const scores = conservationScores(msa);
+        const profile = conservationProfile(msa);
+        const scores = profile.identity;
 
-        // Build PDB residue index to map consensus index → PDB residue
-        const { map: residueMap } = buildResidueIndex(state._lastPdbText);
+        // Put a score on each residue of the structure.
+        //
+        // The alignment is built on the reference sequences, so a residue
+        // of the crystal has to be carried to the right one first. The
+        // chain's own sequence is matched against its reference directly,
+        // which is self-correcting: a construct usually starts part way
+        // into the protein, and the deposited numbering and the database
+        // numbering can disagree about an initiator methionine the crystal
+        // has already lost. The alignment's own gaps shift the columns
+        // again, so both are applied.
+        const columnMaps = refs.map((r, i) => canonicalColumnMap(msa.aligned[i], r.seq.length));
+        const rowOf = new Map(refs.map((r, i) => [r.acc, i]));
         const conservationByResidue = new Map();
-        for (const [key, v] of residueMap) {
-          if (v.seqIdx < scores.length) {
-            conservationByResidue.set(key, scores[v.seqIdx]);
-          }
+        const conservationStrength = new Map();
+        let mapped = 0;
+        const chains = (state.sequence && state.sequence.chains) || [];
+        for (const chain of chains) {
+          // The chain's own accession if it still resolves to a sequence,
+          // otherwise the current accession for the same protein.
+          let chainAcc2 = chainAcc.get(chain.id);
+          if (chainAcc2 != null && !rowOf.has(chainAcc2)) chainAcc2 = msaAcc;
+          const ri = chainAcc2 == null ? undefined : rowOf.get(chainAcc2);
+          if (ri === undefined) continue;
+          const residues = chain.residues || [];
+          const chainSeq = residues.map((r) => r.one || "X").join("");
+          const off = sequenceOffset(refs[ri].seq, chainSeq);
+          if (off.offset < 0 || off.identity < 0.6) continue;
+          residues.forEach((r, i) => {
+            const col = columnMaps[ri][off.offset + i];
+            if (col == null || col < 0 || col >= scores.length) return;
+            const key = `${chain.id}:${r.resi}`;
+            conservationByResidue.set(key, scores[col]);
+            // Strength is the fraction of the whole alignment that matches
+            // the consensus at this position - identity multiplied by
+            // coverage. It is what the pocket readout uses, because a
+            // position that exists in one sequence only is not conserved
+            // even though nothing disagrees with it.
+            conservationStrength.set(key, profile.strength[col]);
+            mapped++;
+          });
         }
-        state.conservation = { byResidue: conservationByResidue, homologs: allSeqs.length - 1 };
+        state.conservation = {
+          byResidue: conservationByResidue,
+          byResidueStrength: conservationStrength,
+          homologs: Math.max(0, allSeqs.length - refs.length),
+          sequences: allSeqs.length,
+          family: familyLabel,
+          mapped,
+        };
 
-        // Colour the structure by conservation. Switch the colour scheme
-        // rather than stamping a style, so the map applies to the current
-        // representation and survives a later style change.
-        state.currentColor = "conservation";
-        dom.ctrlColor.value = "conservation";
-        applyAllStyles();
-        state.viewer.render();
-        dom.conservationStatus.textContent = `Conservation: ${allSeqs.length - 1} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
-        showToast("Conservation map applied", "success");
+        if (applyColors) {
+          // Colour the structure by conservation. Switch the colour scheme
+          // rather than stamping a style, so the map applies to the current
+          // representation and survives a later style change.
+          state.currentColor = "conservation";
+          dom.ctrlColor.value = "conservation";
+          applyAllStyles();
+          state.viewer.render();
+        }
+        dom.conservationStatus.textContent = `Conservation: ${Math.max(0, allSeqs.length - refs.length)} homologs aligned · mean identity ${(scores.reduce((a, v) => a + v, 0) / scores.length * 100).toFixed(1)}%`;
+        if (applyColors) showToast("Conservation map applied", "success");
+        // The drug panel scores pocket conservation, so it has to be redrawn.
+        if (state.drugProfile) renderDrugPanel();
       } catch (err) {
         dom.conservationStatus.textContent = `MSA failed: ${err.message}`;
         showCustomError(`Conservation fetch failed: ${err.message}`);
@@ -1937,7 +2157,7 @@
     state.conservationJob = job;
     return job;
   }
-  dom.btnFetchConservation.addEventListener("click", loadConservation);
+  dom.btnFetchConservation.addEventListener("click", () => loadConservation());
   dom.btnClearConservation.addEventListener("click", () => {
     state.conservation = null;
     // Conservation is no longer available, so fall back to a scheme that is.
@@ -2779,6 +2999,17 @@
         ? crossValidateLigand(props, { formula_weight: ccd.formulaWeight, formula: ccd.formula },
                              props.composition)
         : { checks: [], agree: false };
+      // Conservation of the pocket's lining residues. The alignment is
+      // fetched here if it has not been already: the drug readout is about
+      // which cavity is the functional site, and conservation is what says
+      // so. The structure is NOT recoloured - the user did not ask for the
+      // conservation map, only for the numbers.
+      if (!state.conservation) {
+        dom.drugStatus.textContent = "Aligning homologues to score pocket conservation…";
+        await loadConservation({ applyColors: false });
+      }
+      const strength = (state.conservation && state.conservation.byResidueStrength) || null;
+
       const pocketRows = (state.pockets || []).map((p, i) => {
         const d = druggabilityVerdict(p);
         const occ = siteCheck.perPocket.find((o) => o.index === i);
@@ -2791,8 +3022,34 @@
           reasons: d.reasons,
           occupancy: occ ? occ.occupancy : 0,
           meanDistance: occ ? occ.meanDistance : null,
+          conservation: pocketConservation(p, strength),
         };
       });
+
+      // Conservation of the site, measured two ways.
+      //
+      // The residues the ligand actually touches are the ones under
+      // selection: a hinge methionine, a gatekeeper threonine, the
+      // proximal histidine of a haem. The whole cavity lining is not - it
+      // includes rim residues that carry no constraint at all, and
+      // averaging over them dilutes the signal. So the site is scored on
+      // its contact residues and compared with the protein's own baseline,
+      // which is the fair comparison: a functional site is maintained
+      // better than the protein around it.
+      const contactConservation = strength
+        ? pocketConservation({ residues: [...contacts] }, strength)
+        : null;
+      const proteinConservation = strength
+        ? pocketConservation({ residues: [...strength.keys()] }, strength)
+        : null;
+      // The cavity-versus-cavity comparison is kept as context: the protein
+      // did not evolve to bind this particular ligand, so the ligand's
+      // cavity should not be privileged by the detector.
+      const siteRow = pocketRows.find((r) => r.index === siteCheck.index);
+      const siteConservation = siteCheck.found && siteRow
+        ? siteConservationEdge(siteRow.conservation,
+            pocketRows.filter((r) => r.index !== siteCheck.index).map((r) => r.conservation))
+        : null;
 
       // --- is the bound ligand itself one of the target's drugs? ---
       const matchedDrug = target ? matchDrugToLigand(
@@ -2801,7 +3058,11 @@
       state.drugProfile = {
         target, otError, ccd, affinity: summariseAffinity(forLigand),
         siteCheck, validation, pockets: pocketRows, matchedDrug, accession,
-        contacts, recall, hasLigand: !!compId,
+        contacts, recall, hasLigand: !!compId, siteConservation,
+        contactConservation, proteinConservation,
+        conservationAvailable: !!strength,
+        homologs: state.conservation ? state.conservation.homologs : 0,
+        family: state.conservation ? state.conservation.family : "",
       };
       renderDrugPanel();
       showToast("Drug discovery profile loaded", "success");
@@ -2860,14 +3121,19 @@
 
     // --- pocket druggability ---
     if (d.pockets.length) {
+      const consNote = d.conservationAvailable
+        ? `<div class="muted small">Conservation = the mean conservation of each pocket's lining residues across ${d.homologs} homolog${d.homologs === 1 ? "" : "s"}${d.family ? ` of the ${escapeHtml(d.family)}` : ""}. A cavity lined by residues the family keeps is more likely to be the functional site.</div>`
+        : '<div class="muted small">Conservation needs a homologue alignment, which was not available for this structure.</div>';
       parts.push(`<div class="drug-block">
         <div class="drug-block-head">Detected pockets</div>
-        <div class="drug-table-head"><span>#</span><span>Volume</span><span>Enclosure</span><span>Verdict</span><span>Ligand</span></div>
+        ${consNote}
+        <div class="drug-table-head"><span>#</span><span>Volume</span><span>Enclosure</span><span>Verdict</span><span>Cons.</span><span>Ligand</span></div>
         ${d.pockets.map((p) => `<div class="drug-table-row${p.occupancy > 0.5 ? " drug-row-hit" : ""}">
           <span>${p.index + 1}</span>
           <span>${Math.round(p.volume)} Å³</span>
           <span>${Number.isFinite(p.enclosure) ? p.enclosure.toFixed(2) : "—"}</span>
           <span class="drug-verdict drug-verdict-${p.verdict}">${escapeHtml(p.label)}</span>
+          <span class="drug-cons drug-cons-${p.conservation.verdict}" title="${escapeHtml((p.conservation.reasons || []).join("; "))}">${p.conservation.mean != null ? Math.round(p.conservation.mean * 100) + "%" : "—"}</span>
           <span>${p.occupancy > 0 ? Math.round(p.occupancy * 100) + "%" : "—"}</span>
         </div>`).join("")}
       </div>`);
@@ -2898,6 +3164,24 @@
           ok: d.recall.recall >= 0.5,
           name: "Binding-site residues",
           detail: `${d.recall.covered} of ${d.recall.total} residues touching the ligand are inside the pocket`,
+        });
+      }
+      if (d.contactConservation && d.proteinConservation &&
+          d.contactConservation.mean != null && d.proteinConservation.mean != null) {
+        const site = d.contactConservation.mean;
+        const baseline = d.proteinConservation.mean;
+        const pct = (v) => Math.round(v * 100) + "%";
+        const others = d.siteConservation && d.siteConservation.compared
+          ? `; the ligand's cavity itself is ${pct(d.siteConservation.siteMean)} conserved against ${pct(d.siteConservation.otherMean)} for the other cavities`
+          : "";
+        checks.push({
+          // The residues a ligand binds are under selection if the site is
+          // the protein's own functional site. A ligand bound to a
+          // transient void would sit among residues no more conserved
+          // than the protein's average.
+          ok: site > baseline,
+          name: "Site conservation",
+          detail: `the ${d.contactConservation.total} residues the ligand binds are ${pct(site)} conserved across ${d.homologs} homolog${d.homologs === 1 ? "" : "s"}, against ${pct(baseline)} for the protein as a whole${others}`,
         });
       }
     } else {
@@ -3181,16 +3465,23 @@
 
         // Map each pocket to the residues that line its cavity, and measure
         // how much of the bound ligand sits inside it.
+        //
+        // Only polymer residues count. Waters and ions sit in the cavity
+        // too, and they have no counterpart in a sequence alignment, so
+        // leaving them in would drag every conservation score down and
+        // list molecules that are not part of the protein.
+        const polymerResidues = new Set(buildResidueIndex(state._lastPdbText).map.keys());
         for (const pk of top) {
           const set = new Set();
           if (pk.points) {
             for (const p of pk.points) {
               for (const a of atomsNear(hash, p[0], p[1], p[2], POCKET_LINING_R)) {
-                set.add(`${a.chain}:${a.resi}`);
+                const key = `${a.chain}:${a.resi}`;
+                if (polymerResidues.has(key)) set.add(key);
               }
             }
           }
-          pk.residues = Array.from(set).slice(0, 25);
+          pk.residues = Array.from(set).slice(0, 40);
 
           // How much of the bound ligand sits in this cavity? The ligand was
           // removed before the scan, so this is a real test: the cavity was

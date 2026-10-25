@@ -905,6 +905,71 @@ the code had not.
   filling aliased cells until the safety cap. The lattice extent is now
   derived from the array length and enforced.
 
+### 11.3 Pocket conservation - and what it took to make it mean anything
+
+The drug panel now scores each pocket's lining residues for conservation,
+because a cavity lined by residues the protein family keeps is more likely to
+be the functional site, and one lined by residues that vary from one relative
+to the next is more likely to be an incidental void. It turned out to be the
+single most consequential part of the work, because the conservation
+machinery the panel was built on was wrong in four separate ways.
+
+**The homologues were not homologues.** The alignment was built by searching
+UniProt for the protein's *name*. UniProt tokenises that field, so "epidermal
+growth factor receptor" also matches EGF, EPS8, GRB7, DNER and the Cripto
+proteins - proteins that share words with the name and nothing else. EGFR's
+kinase domain was being aligned against a secreted growth factor and two
+adapter proteins. Every entry states the family it belongs to ("Belongs to
+the EGF receptor subfamily"), and that family is exactly the set a
+conservation score should be measured against. The search now uses the
+family, deduped by gene symbol so one protein cannot take several slots.
+
+**The residues were scored at the wrong positions.** The alignment is built
+on the reference sequence, and the score of a residue of the crystal was
+looked up at that residue's *index in the chain* - as if a construct started
+at residue 1 of the protein. 1M17's chain A starts at PDB residue 671, which
+is UniProt residue 695, so every score was read 687 positions away from the
+residue it belonged to. The correlation between the old mapping and the
+correct one, measured over EGFR's 312 residues, was **-0.07**: no better
+than chance. Each chain's sequence is now matched directly against its own
+reference sequence, which is self-correcting: a construct starts part way
+into the protein, and the deposited numbering and the database numbering can
+disagree about an initiator methionine the crystal has already lost.
+
+**A structure can hold more than one protein.** Haemoglobin has an alpha
+chain and a beta chain and they are different proteins; the beta chain's
+residues were being numbered with the alpha chain's reference. Each chain now
+gets its own reference sequence and its own row in the alignment.
+
+**The alignment itself exploded.** The progressive alignment re-aligned every
+earlier row to an already gapped consensus on each pass, and the gap columns
+accumulated: aligning E. coli adenylate kinase to nine human adenylate
+kinases produced a **1,911-column alignment of a 214-residue protein** with a
+mean identity of 10 %. The columns are now the reference sequence's
+residues, and the same alignment is 214 columns with a mean identity of
+56 %.
+
+With those fixed, the readout says what biology says:
+
+| Structure | Residues the ligand binds | Protein as a whole | The ligand's cavity | Other cavities |
+|---|---|---|---|---|
+| 1M17 EGFR / erlotinib | **87 %** conserved (ERBB family) | 79 % | 85 % | 79 % |
+| 6OIM KRAS G12C / sotorasib | **79 %** (KRAS family) | 65 % | 72 % | 64 % |
+| 2DN2 haemoglobin / haem | **81 %** (globin family) | 55 % | 66 % | 46 % |
+| 1MBO myoglobin / haem | **48 %** (globin family) | 37 % | 48 % | 36 % |
+
+In each case the ligand's cavity is the most conserved cavity in the
+structure, and the residues the drug binds are better conserved than the
+protein around them - which is what a real binding site looks like, and what
+an incidental void does not.
+
+Two smaller defects fell out of the same work: the conservation scores
+survived a protein change (so a new structure could be scored with the
+previous one's alignment), and the pocket's "lining residues" included
+waters and ions, which have no counterpart in an alignment and dragged every
+score down.
+
+
 ---
 
 ## 12. Verification
@@ -914,7 +979,7 @@ Everything in this document was checked, not assumed.
 | Check | Method | Result |
 |---|---|---|
 | Syntax of every JS file | `npm run check` (`node --check` × 21) | pass |
-| Unit + behavioural suites | `npm test` | **1,099 assertions, 0 failed** (75 analysis + 133 expression + 197 validation + 126 annotation + 77 variant + 88 colour + 69 bio + 208 drug + 118 pocket geometry + 8 network) |
+| Unit + behavioural suites | `npm test` | **1,316 assertions, 0 failed** (208 analysis + 133 expression + 197 validation + 126 annotation + 77 variant + 88 colour + 69 bio + 300 drug + 118 pocket geometry + 8 network) |
 | Pocket-function equivalence | Old `app.js` vs `src/pockets.js` on real 1M17 (2,511 atoms) | 0 mismatches over 1,848 probes |
 | Drug-site recall preserved | Enclosure fraction at the erlotinib site, 1M17 | 121/144 above the 0.75 threshold |
 | Off-site specificity preserved | Off-drug probe points, 1M17 | 3/8 above threshold (rejected as before) |
@@ -923,7 +988,8 @@ Everything in this document was checked, not assumed.
 | DOM bindings intact | All 116 `$(...)` ids cross-checked against `index.html` | 116/116 present, 0 missing |
 | Lint baseline | ESLint 9, correctness rules, `app.js` + `src/` + `data/` | 0 errors, 34 warnings, 0 genuine undefined refs |
 | Live page load | Real browser, local server | 0 console errors, 13 proteins rendered, 3Dmol initialised, modules callable |
-| Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 5/5 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
+| Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
+| Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
 | Deployment | GitHub Actions on push to `main` | green |
 

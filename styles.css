@@ -1443,7 +1443,7 @@ a:hover { text-decoration: underline; }
 .drug-table-head,
 .drug-table-row {
   display: grid;
-  grid-template-columns: 20px 62px 66px 1fr 44px;
+  grid-template-columns: 20px 56px 58px 1fr 38px 40px;
   gap: 6px;
   font-size: 10.5px;
   padding: 2.5px 0;
@@ -1461,6 +1461,11 @@ a:hover { text-decoration: underline; }
 .drug-verdict-marginal { color: #fcd34d; }
 .drug-verdict-undruggable { color: #fca5a5; }
 .drug-verdict-unknown { color: var(--text-2); }
+.drug-cons { font-size: 10px; font-variant-numeric: tabular-nums; }
+.drug-cons-conserved { color: #86efac; }
+.drug-cons-partial { color: #fcd34d; }
+.drug-cons-variable { color: #fca5a5; }
+.drug-cons-unknown { color: var(--text-2); }
 .drug-check {
   display: grid;
   grid-template-columns: 16px 1fr;

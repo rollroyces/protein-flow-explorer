@@ -627,5 +627,238 @@ check("a missing drug list matches nothing",
 check("an empty drug list matches nothing",
   D.matchDrugToLigand("Erlotinib", "AQ4", []) === null);
 
+// ------------------------------------------------------- pocket conservation
+console.log("\nPocket conservation");
+check("the conservation thresholds are exported",
+  !!D.CONSERVATION && D.CONSERVATION.conserved === 0.75 && D.CONSERVATION.partial === 0.45,
+  `(${JSON.stringify(D.CONSERVATION)})`);
+check("the conserved threshold is the stricter of the two",
+  D.CONSERVATION.conserved > D.CONSERVATION.partial);
+check("the two conservation functions are exported",
+  typeof D.pocketConservation === "function" && typeof D.siteConservationEdge === "function");
+
+// A pocket with no lining residues at all.
+const consEmpty = D.pocketConservation({ residues: [] }, new Map());
+check("an empty pocket is unknown", consEmpty.verdict === "unknown",
+  `(${consEmpty.verdict})`);
+check("an empty pocket is labelled Unknown", consEmpty.label === "Unknown");
+check("an empty pocket has no mean", consEmpty.mean === null);
+check("an empty pocket has no median", consEmpty.median === null);
+check("an empty pocket covers nothing", consEmpty.covered === 0);
+check("an empty pocket has no lining residues", consEmpty.total === 0);
+check("it says the pocket has no lining residues",
+  /the pocket has no lining residues/.test(consEmpty.reasons.join(" ")),
+  `(${consEmpty.reasons.join("; ")})`);
+check("a pocket with no residue list at all is unknown too",
+  D.pocketConservation({}, new Map()).verdict === "unknown" &&
+  D.pocketConservation({}, new Map()).total === 0);
+
+// Residues but no scores at all.
+const consNoScores = D.pocketConservation({ residues: ["A:769", "A:770", "A:771"] }, null);
+check("a pocket with no scores loaded is unknown", consNoScores.verdict === "unknown",
+  `(${consNoScores.verdict})`);
+check("it says no conservation scores were loaded",
+  /no conservation scores loaded/.test(consNoScores.reasons.join(" ")),
+  `(${consNoScores.reasons.join("; ")})`);
+check("it still reports how many lining residues there are", consNoScores.total === 3);
+check("it covers nothing without scores", consNoScores.covered === 0);
+check("it has no mean without scores", consNoScores.mean === null);
+check("undefined scores are treated like missing scores",
+  D.pocketConservation({ residues: ["A:769"] }, undefined).verdict === "unknown" &&
+  /no conservation scores loaded/.test(
+    D.pocketConservation({ residues: ["A:769"] }, undefined).reasons.join(" ")));
+
+// Residues, but none of them in the alignment.
+const consAbsent = D.pocketConservation(
+  { residues: ["A:769", "A:770", "A:771"] }, new Map([["B:12", 0.9]]));
+check("a pocket whose residues are all absent is unknown", consAbsent.verdict === "unknown",
+  `(${consAbsent.verdict})`);
+check("it covers none of them", consAbsent.covered === 0);
+check("it still counts the lining residues", consAbsent.total === 3);
+check("it has no mean", consAbsent.mean === null);
+check("it says none of the lining residues are in the alignment",
+  /none of the lining residues are in the alignment/.test(consAbsent.reasons.join(" ")),
+  `(${consAbsent.reasons.join("; ")})`);
+const consEmptyScores = D.pocketConservation({ residues: ["A:769", "A:770"] }, new Map());
+check("an empty score map leaves nothing to score",
+  consEmptyScores.verdict === "unknown" && consEmptyScores.covered === 0);
+check("an empty score map is reported as nothing in the alignment",
+  /none of the lining residues are in the alignment/.test(consEmptyScores.reasons.join(" ")),
+  `(${consEmptyScores.reasons.join("; ")})`);
+
+// The three bands.
+const lining = ["A:769", "A:770", "A:771"];
+const pocketOf = (scores) => D.pocketConservation({ residues: lining }, new Map(Object.entries(scores)));
+const allOne = pocketOf({ "A:769": 1, "A:770": 1, "A:771": 1 });
+check("a fully conserved pocket is conserved", allOne.verdict === "conserved",
+  `(${allOne.verdict})`);
+check("it is labelled Conserved", allOne.label === "Conserved");
+check("its mean is 1", near(allOne.mean, 1), `(${allOne.mean})`);
+check("its median is 1", near(allOne.median, 1), `(${allOne.median})`);
+check("every residue counts as conserved", allOne.conservedCount === 3);
+check("no residue counts as variable", allOne.variableCount === 0);
+check("all of the lining residues are covered", allOne.covered === 3 && allOne.total === 3);
+check("a pocket conserved at 0.9 is conserved", pocketOf(
+  { "A:769": 0.9, "A:770": 0.9, "A:771": 0.9 }).verdict === "conserved");
+const allSix = pocketOf({ "A:769": 0.6, "A:770": 0.6, "A:771": 0.6 });
+check("a pocket conserved at 0.6 is partly conserved", allSix.verdict === "partial",
+  `(${allSix.verdict})`);
+check("it is labelled Partly conserved", allSix.label === "Partly conserved");
+const allTwo = pocketOf({ "A:769": 0.2, "A:770": 0.2, "A:771": 0.2 });
+check("a pocket conserved at 0.2 is variable", allTwo.verdict === "variable",
+  `(${allTwo.verdict})`);
+check("it is labelled Variable", allTwo.label === "Variable");
+
+// The boundaries are inclusive.
+check("a mean exactly at the conserved threshold is conserved",
+  pocketOf({ "A:769": 0.75, "A:770": 0.75, "A:771": 0.75 }).verdict === "conserved");
+check("a mean exactly at the partial threshold is partly conserved",
+  pocketOf({ "A:769": 0.45, "A:770": 0.45, "A:771": 0.45 }).verdict === "partial");
+
+// Mixed sets, one per band.
+const mixCons = pocketOf({ "A:769": 0.9, "A:770": 0.7, "A:771": 0.8 });
+check("a mixed set whose mean is 0.8 is conserved", mixCons.verdict === "conserved",
+  `(${mixCons.mean})`);
+check("its mean is the average of the scores", near(mixCons.mean, 0.8), `(${mixCons.mean})`);
+const mixPart = pocketOf({ "A:769": 0.6, "A:770": 0.4, "A:771": 0.5 });
+check("a mixed set whose mean is 0.5 is partly conserved", mixPart.verdict === "partial",
+  `(${mixPart.mean})`);
+const mixVar = pocketOf({ "A:769": 0.4, "A:770": 0.3, "A:771": 0.2 });
+check("a mixed set whose mean is 0.3 is variable", mixVar.verdict === "variable",
+  `(${mixVar.mean})`);
+
+// The median.
+const evenMedian = D.pocketConservation(
+  { residues: ["A:769", "A:770", "A:771", "A:772"] },
+  new Map(Object.entries({ "A:769": 0.1, "A:770": 0.5, "A:771": 0.6, "A:772": 0.9 })));
+check("an even number of scores takes the average of the two middle values",
+  near(evenMedian.median, 0.55), `(${evenMedian.median})`);
+const oddMedian = pocketOf({ "A:769": 0.1, "A:770": 0.5, "A:771": 0.9 });
+check("an odd number of scores takes the middle value", near(oddMedian.median, 0.5),
+  `(${oddMedian.median})`);
+
+// Covered counts the scored residues, total counts all of them.
+const partCover = D.pocketConservation(
+  { residues: lining }, new Map([["A:769", 0.9], ["A:770", 0.8]]));
+check("covered counts only the residues that had a score", partCover.covered === 2);
+check("total counts every lining residue", partCover.total === 3);
+
+// The three counts.
+const counts = pocketOf({ "A:769": 0.9, "A:770": 0.5, "A:771": 0.2 });
+check("a residue at 0.9 counts as conserved", counts.conservedCount === 1);
+check("a residue at 0.2 counts as variable", counts.variableCount === 1);
+check("a residue at 0.5 counts as neither", counts.covered === 3 &&
+  counts.conservedCount === 1 && counts.variableCount === 1);
+const edgeCounts = pocketOf({ "A:769": 0.75, "A:770": 0.45, "A:771": 0.5 });
+check("a residue exactly at 0.75 counts as conserved", edgeCounts.conservedCount === 1);
+check("a residue exactly at 0.45 is not counted as variable", edgeCounts.variableCount === 0);
+
+// The reasons.
+const reasonSet = pocketOf({ "A:769": 0.9, "A:770": 0.8, "A:771": 0.2 });
+check("it says how many lining residues are conserved",
+  /2 of 3 lining residues are conserved/.test(reasonSet.reasons.join(" ")),
+  `(${reasonSet.reasons.join("; ")})`);
+check("it says how many vary between homologues",
+  /1 vary between homologues/.test(reasonSet.reasons.join(" ")),
+  `(${reasonSet.reasons.join("; ")})`);
+check("it gives exactly the two reasons it should", reasonSet.reasons.length === 2);
+check("it does not complain about the alignment when every residue was scored",
+  !/not in the alignment/.test(reasonSet.reasons.join(" ")));
+const oneUnscored = D.pocketConservation(
+  { residues: lining }, new Map([["A:769", 0.9], ["A:770", 0.8]]));
+check("it says how many lining residues are not in the alignment",
+  /1 lining residues are not in the alignment/.test(oneUnscored.reasons.join(" ")),
+  `(${oneUnscored.reasons.join("; ")})`);
+check("the conserved count is given against the number of scored residues",
+  /2 of 2 lining residues are conserved/.test(oneUnscored.reasons.join(" ")),
+  `(${oneUnscored.reasons.join("; ")})`);
+const noConserved = pocketOf({ "A:769": 0.5, "A:770": 0.4, "A:771": 0.3 });
+check("it does not claim any residues are conserved when none are",
+  !/are conserved/.test(noConserved.reasons.join(" ")),
+  `(${noConserved.reasons.join("; ")})`);
+check("it does not claim any residues vary when none do",
+  !/vary between homologues/.test(allOne.reasons.join(" ")),
+  `(${allOne.reasons.join("; ")})`);
+
+// A Map and a plain object holding the same data agree.
+const asMap = D.pocketConservation(
+  { residues: lining }, new Map([["A:769", 0.9], ["A:770", 0.8], ["A:771", 0.2]]));
+const asObject = D.pocketConservation(
+  { residues: lining }, { "A:769": 0.9, "A:770": 0.8, "A:771": 0.2 });
+check("a plain object of scores gives the same verdict as a Map",
+  asObject.verdict === asMap.verdict);
+check("a plain object of scores gives the same mean as a Map", near(asObject.mean, asMap.mean));
+check("a plain object of scores gives the same counts as a Map",
+  asObject.covered === asMap.covered && asObject.total === asMap.total &&
+  asObject.conservedCount === asMap.conservedCount &&
+  asObject.variableCount === asMap.variableCount);
+check("a plain object of scores gives the same reasons as a Map",
+  asObject.reasons.join("|") === asMap.reasons.join("|"));
+
+// Scores that are not numbers are ignored, not counted.
+const junk = D.pocketConservation(
+  { residues: lining }, new Map([["A:769", 0.9], ["A:770", NaN], ["A:771", "0.5"]]));
+check("a NaN score is ignored", junk.covered === 1, `(${junk.covered})`);
+check("a non-numeric score is ignored", junk.covered === 1);
+check("the mean is unaffected by the ignored scores", near(junk.mean, 0.9), `(${junk.mean})`);
+check("the total still counts the ignored residues", junk.total === 3);
+const junkObject = D.pocketConservation(
+  { residues: lining }, { "A:769": 0.9, "A:770": null, "A:771": undefined });
+check("a null score is ignored", junkObject.covered === 1, `(${junkObject.covered})`);
+check("an undefined score is ignored", junkObject.covered === 1);
+const infScored = D.pocketConservation(
+  { residues: lining }, new Map([["A:769", 0.9], ["A:770", Infinity], ["A:771", 0.9]]));
+check("an infinite score is ignored", infScored.covered === 2, `(${infScored.covered})`);
+const zeroScored = D.pocketConservation({ residues: ["A:769"] }, new Map([["A:769", 0]]));
+check("a score of zero is still a score",
+  zeroScored.covered === 1 && near(zeroScored.mean, 0), `(${zeroScored.mean})`);
+check("a score of zero counts as variable",
+  zeroScored.variableCount === 1 && zeroScored.verdict === "variable");
+
+// ------------------------------------------------------ site conservation edge
+console.log("\nSite conservation edge");
+const edgeAbove = D.siteConservationEdge({ mean: 0.9 }, [{ mean: 0.5 }, { mean: 0.7 }]);
+check("the site's own mean is reported", near(edgeAbove.siteMean, 0.9));
+check("the other pockets' mean is reported", near(edgeAbove.otherMean, 0.6),
+  `(${edgeAbove.otherMean})`);
+check("the edge is the difference between the two", near(edgeAbove.edge, 0.3),
+  `(${edgeAbove.edge})`);
+check("it says how many pockets were compared", edgeAbove.compared === 2);
+const edgeEqual = D.siteConservationEdge({ mean: 0.6 }, [{ mean: 0.5 }, { mean: 0.7 }]);
+check("a site matching the others has no edge", near(edgeEqual.edge, 0), `(${edgeEqual.edge})`);
+check("the other mean is still reported for a tied site", near(edgeEqual.otherMean, 0.6));
+const edgeBelow = D.siteConservationEdge({ mean: 0.3 }, [{ mean: 0.5 }, { mean: 0.7 }]);
+check("a site below the others has a negative edge", edgeBelow.edge < 0, `(${edgeBelow.edge})`);
+check("the negative edge is the difference between the two", near(edgeBelow.edge, -0.3),
+  `(${edgeBelow.edge})`);
+const edgeSkipped = D.siteConservationEdge({ mean: 0.9 }, [
+  { mean: 0.5 }, { mean: null }, { mean: NaN }, { mean: Infinity }, { mean: "0.8" }, null,
+]);
+check("pockets without a finite mean are skipped", edgeSkipped.compared === 1,
+  `(${edgeSkipped.compared})`);
+check("the other mean uses only the comparable pockets", near(edgeSkipped.otherMean, 0.5),
+  `(${edgeSkipped.otherMean})`);
+check("the edge is measured against the comparable pockets", near(edgeSkipped.edge, 0.4),
+  `(${edgeSkipped.edge})`);
+const edgeSingle = D.siteConservationEdge({ mean: 0.9 }, [{ mean: 0.4 }]);
+check("a single other pocket is compared",
+  edgeSingle.compared === 1 && near(edgeSingle.edge, 0.5), `(${edgeSingle.edge})`);
+check("a site with no mean has no edge",
+  D.siteConservationEdge({ mean: null }, [{ mean: 0.5 }]) === null);
+check("a site with a NaN mean has no edge",
+  D.siteConservationEdge({ mean: NaN }, [{ mean: 0.5 }]) === null);
+check("a site with an infinite mean has no edge",
+  D.siteConservationEdge({ mean: Infinity }, [{ mean: 0.5 }]) === null);
+check("a site with a non-numeric mean has no edge",
+  D.siteConservationEdge({ mean: "0.9" }, [{ mean: 0.5 }]) === null);
+check("a missing site has no edge",
+  D.siteConservationEdge(null, [{ mean: 0.5 }]) === null);
+check("no other pockets means no edge",
+  D.siteConservationEdge({ mean: 0.9 }, []) === null);
+check("a missing list of other pockets means no edge",
+  D.siteConservationEdge({ mean: 0.9 }, null) === null);
+check("other pockets without a finite mean mean no edge",
+  D.siteConservationEdge({ mean: 0.9 }, [{ mean: null }, { mean: NaN }]) === null);
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

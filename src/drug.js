@@ -168,6 +168,113 @@
   }
 
   // ---------------------------------------------------------------------
+  // Conservation of a pocket
+  //
+  // A cavity lined by residues that every related protein keeps is more
+  // likely to be the functional site the protein evolved to use. A cavity
+  // lined by residues that vary from one homologue to the next is more
+  // likely to be an incidental void that happens to be big enough to hold
+  // a ligand. This is what turns the pocket list from a shape analysis
+  // into a statement about biology.
+  // ---------------------------------------------------------------------
+  const CONSERVATION = {
+    // Mean conservation of the lining residues above which the pocket reads
+    // as conserved.
+    conserved: 0.75,
+    // Below this it reads as variable; in between it is partly conserved.
+    partial: 0.45,
+  };
+
+  /**
+   * Conservation of a pocket's lining residues.
+   *
+   * @param {{residues: string[]}} pocket
+   * @param {Map<string, number>|object} scores  "chain:resi" -> conservation (0..1)
+   * @returns {{verdict: string, label: string, mean: number|null, median: number|null,
+   *            covered: number, total: number, conservedCount: number,
+   *            variableCount: number, reasons: string[]}}
+   */
+  function pocketConservation(pocket, scores) {
+    const residues = (pocket && pocket.residues) || [];
+    const empty = {
+      verdict: "unknown", label: "Unknown", mean: null, median: null,
+      covered: 0, total: residues.length, conservedCount: 0, variableCount: 0,
+      reasons: [],
+    };
+    if (!residues.length) {
+      return { ...empty, reasons: ["the pocket has no lining residues"] };
+    }
+    if (!scores) {
+      return { ...empty, reasons: ["no conservation scores loaded"] };
+    }
+    const get = typeof scores.get === "function"
+      ? (k) => scores.get(k)
+      : (k) => scores[k];
+
+    const values = [];
+    let conservedCount = 0, variableCount = 0;
+    for (const r of residues) {
+      const v = get(r);
+      if (typeof v !== "number" || !Number.isFinite(v)) continue;
+      values.push(v);
+      if (v >= CONSERVATION.conserved) conservedCount++;
+      else if (v < CONSERVATION.partial) variableCount++;
+    }
+    if (!values.length) {
+      return { ...empty, reasons: ["none of the lining residues are in the alignment"] };
+    }
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+
+    let verdict, label;
+    if (mean >= CONSERVATION.conserved) {
+      verdict = "conserved"; label = "Conserved";
+    } else if (mean >= CONSERVATION.partial) {
+      verdict = "partial"; label = "Partly conserved";
+    } else {
+      verdict = "variable"; label = "Variable";
+    }
+    const reasons = [];
+    if (conservedCount) {
+      reasons.push(`${conservedCount} of ${values.length} lining residues are conserved`);
+    }
+    if (variableCount) {
+      reasons.push(`${variableCount} vary between homologues`);
+    }
+    if (values.length < residues.length) {
+      reasons.push(`${residues.length - values.length} lining residues are not in the alignment`);
+    }
+    return {
+      verdict, label, mean, median,
+      covered: values.length, total: residues.length,
+      conservedCount, variableCount, reasons,
+    };
+  }
+
+  /**
+   * Is the ligand's pocket more conserved than the other cavities?
+   *
+   * The protein did not evolve to bind this particular ligand, so the
+   * ligand's site should not be privileged by the detector - it should win
+   * on conservation, because it is the functional site the other cavities
+   * are not. A drug site that scores like the incidental voids is evidence
+   * that either the site or the pocket is not what it appears to be.
+   *
+   * @param {{mean: number|null}} site   the pocket holding the ligand
+   * @param {Array<{mean: number|null}>} others  the remaining pockets
+   * @returns {{siteMean: number, otherMean: number, edge: number, compared: number}|null}
+   */
+  function siteConservationEdge(site, others) {
+    if (!site || typeof site.mean !== "number" || !Number.isFinite(site.mean)) return null;
+    const list = (others || []).filter((o) => o && typeof o.mean === "number" && Number.isFinite(o.mean));
+    if (!list.length) return null;
+    const otherMean = list.reduce((a, o) => a + o.mean, 0) / list.length;
+    return { siteMean: site.mean, otherMean, edge: site.mean - otherMean, compared: list.length };
+  }
+
+  // ---------------------------------------------------------------------
   // Cross-validation: does the detected pocket find the real site?
   //
   // The pocket finder never sees the ligand: it scans a voxel grid for
@@ -586,6 +693,7 @@
 
   const api = {
     DRUGGABILITY,
+    CONSERVATION,
     ATOMIC_MASS,
     canonicalElement,
     druggabilityVerdict,
@@ -593,6 +701,8 @@
     validatePocketsAgainstLigand,
     contactResidues,
     pocketResidueRecall,
+    pocketConservation,
+    siteConservationEdge,
     crossValidateLigand,
     countAtomsFromFormula,
     molecularWeight,
