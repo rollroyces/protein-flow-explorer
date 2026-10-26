@@ -1250,7 +1250,8 @@ Everything in this document was checked, not assumed.
 | Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and on a buried area they differ by 0.1-13 % over a 48-system sample (median 1.1 %), the difference being spherical sampling noise amplified by the subtraction |
 | Design package lint | `ruff check python` (`E,F,W,I,UP,B`) | 0 errors |
 | The static site is unaffected | `npm test` and `npm run check` after adding the package | 1,316 assertions, 0 failed; 21 syntax checks clean — unchanged |
-| Deployment | GitHub Actions on push to `main` | the site's own deployment is green; the design package's CI job has not run, because these commits are not pushed |
+| The design package's CI job | GitHub Actions, Python 3.11 with CPU-only torch | first run failed on one test: a strict comparison between two values that are mathematically equal, decided by floating-point rounding. The test's premise was wrong - the residue it meant to hold still was not an interface residue - so it passed locally by luck. Fixed, and the suite was then run under the same interpreter and torch version as CI before pushing again |
+| Deployment | GitHub Actions on push to `main` | green |
 
 ---
 

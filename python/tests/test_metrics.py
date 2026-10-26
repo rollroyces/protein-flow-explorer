@@ -312,11 +312,16 @@ def test_interface_rmsd_ignores_residues_outside_the_valid_mask():
     shift = torch.tensor([0.3, -0.4, 0.5], dtype=torch.float64)
     mobile = coords.clone()
     mobile[iface] += shift
-    mobile[0] = coords[0]  # this interface atom did not move
+    # One of the *interface* residues is not modelled, so it does not move.
+    # (It has to be an interface residue: an unmoved residue outside the
+    # interface would dilute nothing, and the comparison below would be
+    # between two equal numbers, decided by rounding.)
+    unmodelled = int(torch.nonzero(iface)[0])
+    mobile[unmodelled] = coords[unmodelled]
 
     diluted = float(interface_rmsd(mobile, coords, iface))
     valid = torch.ones(coords.shape[0], dtype=torch.bool)
-    valid[0] = False
+    valid[unmodelled] = False
     masked = float(interface_rmsd(mobile, coords, iface, valid_mask=valid))
 
     assert masked == pytest.approx(float(shift.norm()), rel=1e-9)
