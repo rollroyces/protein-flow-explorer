@@ -143,6 +143,23 @@ bsa = buried_surface_area(complex_xyz, radii, group_a, group_b)  # square Angstr
 clashes = clash_report(complex_xyz, MetricConfig(clash_distance=2.0))
 ```
 
+Or all four at once, which is what you want when a generated complex has to
+be judged as a whole:
+
+```python
+from pfe_design import evaluate_complex
+
+report = evaluate_complex(
+    mobile, target, interface_mask,
+    receptor_mask=receptor_mask, ligand_mask=ligand_mask,
+    group_a=group_a, group_b=group_b, radii=radii,
+)
+print(report.irmsd, report.ligand_rmsd, report.bsa, report.n_clashes)
+```
+
+A measurement that needs a piece of information you did not supply is
+reported as `None` rather than guessed at.
+
 The superposition helpers return the rotation and translation as well as the
 aligned coordinates, so a ligand can be carried along with the receptor fit
 instead of being fitted separately — which is what hides receptor motion in
@@ -184,6 +201,21 @@ stubs with a real seam: each declares whether it is installed, and any of them
 accepts an injected callable, so a site-specific installation can be dropped
 in without touching this package.
 
+A structure predictor works from a *sequence*, so the request carries one
+along with the residue-type indices — written for you when you do not supply
+it:
+
+```python
+from pfe_design import residue_types_from_sequence
+
+request = hook.prepare(backbone_xyz, residue_types_from_sequence("ACDEFGHIKL"))
+request.sequence          # 'ACDEFGHIKL'
+```
+
+Index 0 is unknown and is written as `X`; the modified residues a structure
+file may carry (MSE, SEC, PYL, …) are mapped onto the residue they derive
+from.
+
 ## Layout
 
 ```
@@ -195,6 +227,7 @@ python/
 │   ├── vector_field.py  BackboneVelocityField - the conditioned vector field
 │   ├── integration.py   Constrained ODE/SDE integration
 │   ├── metrics.py       iRMSD, ligand RMSD, BSA, steric clashes
+│   ├── sequences.py     Residue-type indices <-> single-letter sequence
 │   └── packing.py       Refinement and side-chain packing hook
 └── tests/
 ```

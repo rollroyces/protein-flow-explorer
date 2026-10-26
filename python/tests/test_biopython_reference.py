@@ -166,3 +166,20 @@ def test_buried_surface_area_is_zero_for_two_far_apart_groups():
     )
 
     assert result.bsa == pytest.approx(0.0, abs=0.5)
+
+
+def test_sasa_agrees_with_biopython_for_a_system_larger_than_one_chunk():
+    """The cross-check at a size that exercises the chunking path.
+
+    The calculation is processed in chunks of atoms, and every earlier
+    cross-check used a system small enough to fit in a single chunk. This
+    one does not, so it covers the code path where the self-occlusion mask
+    has to be built on the atom axis rather than the chunk axis.
+    """
+    coords, elements = _cluster(seed=9, n_atoms=60, spread=5.0)
+    radii = _radii(elements)
+
+    mine = float(sasa(coords, radii, probe=1.4, n_points=100).sum())
+    theirs = sum(_biopython_sasa(coords, elements, n_points=100))
+
+    assert mine == pytest.approx(theirs, rel=0.02)

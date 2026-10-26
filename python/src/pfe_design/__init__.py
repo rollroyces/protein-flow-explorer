@@ -43,11 +43,13 @@ from .metrics import (
     VDW_RADII,
     BSAResult,
     ClashReport,
+    ComplexEvaluation,
     apply_transform,
     buried_surface_area,
     clash_penalty,
     clash_penalty_fn,
     clash_report,
+    evaluate_complex,
     interface_rmsd,
     ligand_rmsd,
     sasa,
@@ -66,6 +68,12 @@ from .packing import (
     SideChainPackingHook,
     build_backend,
     relax_clashes,
+)
+from .sequences import (
+    AA1_ORDER,
+    canonical_sequence,
+    residue_types_from_sequence,
+    sequence_from_residue_types,
 )
 from .vector_field import BackboneVelocityField, PairwiseBiasAttention, rbf_features
 
@@ -99,17 +107,24 @@ __all__ = [
     # metrics
     "BSAResult",
     "ClashReport",
+    "ComplexEvaluation",
     "VDW_RADII",
     "apply_transform",
     "buried_surface_area",
     "clash_penalty",
     "clash_penalty_fn",
     "clash_report",
+    "evaluate_complex",
     "interface_rmsd",
     "ligand_rmsd",
     "sasa",
     "superpose",
     "vdw_radii",
+    # sequences
+    "AA1_ORDER",
+    "canonical_sequence",
+    "residue_types_from_sequence",
+    "sequence_from_residue_types",
     # packing
     "BackendUnavailableError",
     "ESMFoldBackend",

@@ -32,6 +32,7 @@ from .config import MetricConfig
 __all__ = [
     "ClashReport",
     "BSAResult",
+    "ComplexEvaluation",
     "VDW_RADII",
     "vdw_radii",
     "superpose",
@@ -179,6 +180,120 @@ def apply_transform(coords: Tensor, rotation: Tensor, translation: Tensor) -> Te
     if coords.dim() == 2:
         return coords @ rotation.transpose(-1, -2) + translation
     return torch.bmm(coords, rotation.transpose(-1, -2)) + translation.unsqueeze(-2)
+
+
+@dataclass(frozen=True)
+class ComplexEvaluation:
+    """The four geometry measurements of a complex, computed in one call.
+
+    Attributes
+    ----------
+    irmsd:
+        Interface RMSD after superposing on the receptor, in Angstrom.
+    ligand_rmsd:
+        Ligand RMSD after the same superposition, in Angstrom.  ``None`` when
+        no ligand was given.
+    bsa:
+        Buried surface area on complex formation, in square Angstrom.
+        ``None`` when the two partner groups were not given.
+    n_clashes:
+        Number of clashing atom pairs.
+    clash_penalty:
+        Sum of the squared overlaps of the clashing pairs.
+    max_overlap:
+        Largest single overlap, in Angstrom.
+    """
+
+    irmsd: float | None
+    ligand_rmsd: float | None
+    bsa: float | None
+    n_clashes: int
+    clash_penalty: float
+    max_overlap: float
+
+    @property
+    def is_clean(self) -> bool:
+        """True when no steric clash was found."""
+        return self.n_clashes == 0
+
+
+def evaluate_complex(
+    mobile: Tensor,
+    target: Tensor,
+    interface_mask: Tensor,
+    receptor_mask: Tensor | None = None,
+    ligand_mask: Tensor | None = None,
+    group_a: Tensor | None = None,
+    group_b: Tensor | None = None,
+    radii: Tensor | None = None,
+    residue_index: Tensor | None = None,
+    cfg: MetricConfig | None = None,
+) -> ComplexEvaluation:
+    """Measure a complex: iRMSD, ligand RMSD, buried area and clashes at once.
+
+    This is the façade over the individual metrics, for the case where a
+    generated complex has to be judged as a whole.  Each measurement that
+    needs an extra piece of information (a ligand, the two partner groups)
+    is reported as ``None`` when that information was not supplied, rather
+    than being guessed at.
+
+    Parameters
+    ----------
+    mobile, target:
+        Coordinates of the complex and of the reference, ``(N, 3)``.
+    interface_mask:
+        1 for the residues that form the interface, ``(N,)``.
+    receptor_mask:
+        The atoms used for the superposition.  Without it the fit uses
+        everything that is not the interface, which for a complex with a
+        ligand includes the ligand.
+    ligand_mask:
+        1 for the ligand's atoms; needed for the ligand RMSD.
+    group_a, group_b:
+        The two partner groups; needed for the buried surface area.
+    radii:
+        Atomic radii, needed for the clash analysis in ``vdw`` mode.
+    residue_index:
+        Residue index per atom; same-residue pairs are then not counted as
+        clashes.
+    cfg:
+        Metric settings.
+
+    Returns
+    -------
+    ComplexEvaluation
+    """
+    if mobile.dim() != 2:
+        raise ValueError(
+            f"evaluate_complex takes one complex, with shape (n_residues, 3); "
+            f"got {tuple(mobile.shape)}. Use interface_rmsd for a batch."
+        )
+    cfg = cfg or MetricConfig()
+
+    irmsd = float(interface_rmsd(mobile, target, interface_mask, receptor_mask=receptor_mask))
+
+    ligand_value: float | None = None
+    if ligand_mask is not None:
+        fit = receptor_mask
+        if fit is None:
+            fit = ~_as_batch(interface_mask, 1, mobile.shape[0])[0]
+        ligand_value = float(ligand_rmsd(mobile, target, fit, ligand_mask))
+
+    bsa_value: float | None = None
+    if group_a is not None and group_b is not None:
+        if radii is None:
+            radii = torch.full((mobile.shape[0],), 1.70, dtype=torch.float64)
+        bsa_value = buried_surface_area(mobile, radii, group_a, group_b, cfg).bsa
+
+    report = clash_report(mobile, cfg, radii, residue_index)
+    return ComplexEvaluation(
+        irmsd=irmsd,
+        ligand_rmsd=ligand_value,
+        bsa=bsa_value,
+        n_clashes=report.n_clashes,
+        clash_penalty=report.penalty,
+        max_overlap=report.max_overlap,
+    )
 
 
 def _as_batch(mask: Tensor, batch: int, n: int) -> Tensor:
@@ -372,6 +487,7 @@ def sasa(
     area_per_point = 4.0 * math.pi * expanded ** 2 / n_points
 
     out = torch.zeros(n, dtype=torch.float64, device=coords.device)
+    atom_ids = torch.arange(n, device=coords.device)
     for start in range(0, n, chunk):
         end = min(start + chunk, n)
         points = (
@@ -380,9 +496,14 @@ def sasa(
         distances = torch.cdist(points.reshape(-1, 3), coords).reshape(
             end - start, n_points, n
         )
-        own = torch.arange(start, end, device=coords.device)
-        own_index = torch.arange(end - start, device=coords.device)
-        self_hit = own_index[:, None, None] == own[None, None, :]
+        # An atom must not occlude itself. The chunk index c stands for the
+        # atom (start + c), while the last axis of `distances` runs over all
+        # n atoms - so the self-hit mask is built on that axis, not on the
+        # chunk axis. (Getting this wrong only shows up once there is more
+        # than one chunk, which is why the system must be tested at a size
+        # larger than the chunk.)
+        chunk_index = torch.arange(end - start, device=coords.device)
+        self_hit = (chunk_index[:, None, None] + start) == atom_ids[None, None, :]
         distances = distances.masked_fill(self_hit, float("inf"))
         occluded = (distances < expanded[None, None, :]).any(dim=-1)
         out[start:end] = (~occluded).sum(dim=-1) * area_per_point[start:end]

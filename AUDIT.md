@@ -1071,7 +1071,29 @@ site-specific installation can be dropped in without touching the package; a
 backend that returns something worse than it was given is rejected rather than
 accepted silently.
 
-### 12.6 The defects this exposed
+The review found that the ESMFold seam was thinner than the brief's wording
+allows: a structure predictor works from a *sequence*, and the request was
+carrying residue-type *indices*, so driving it needed an adapter the caller
+had to write. The package now writes the sequence itself - index 0 is unknown
+and written as `X`, indices 1-20 are the standard amino acids, and the
+modified residues a structure file may carry (MSE, SEC, PYL, ...) are mapped
+onto the residue they derive from. The request carries both, so the seam can
+actually be driven.
+
+### 12.6 One call for the whole judgement
+
+Requirement 2 asks for a utility module that computes the interface RMSD, the
+ligand RMSD, the buried surface area and the steric clash penalty. They are
+four separate functions because they need four different pieces of
+information, and each measurement that cannot be made is reported as `None`
+rather than guessed at.
+
+`evaluate_complex` is the façade: one call, one result object, with the
+interface RMSD, the ligand RMSD, the buried area and the clash count
+together. Writing it is what surfaced the chunking defect in §12.8 - the
+first test with a complex larger than thirty-two atoms broke it.
+
+### 12.7 The defects this exposed
 
 Written down because the first two would have produced numbers that looked
 fine:
@@ -1085,7 +1107,7 @@ fine:
   instead of the neighbour axis, so the pair features were broadcast against
   the wrong dimension.
 
-### 12.7 What an independent review found
+### 12.8 What an independent review found
 
 The package was handed to a verifier with instructions to break it: a hostile
 velocity model, adversarial masks, in-memory mutations of the guarantees,
@@ -1108,7 +1130,18 @@ The review also corrected two claims in this document: the mutation
 experiment described in §12.3, and the "two independent guarantees"
 framing it belongs to.
 
-### 12.8 What this is not
+A ninth defect turned up while the one-call evaluator was being written, and
+it is the worst of the nine because every earlier test had missed it: the
+surface-area calculation only worked for systems of thirty-two atoms or
+fewer. The self-occlusion mask was built on the chunk axis instead of the
+atom axis, so as soon as a system needed more than one chunk the shapes
+stopped matching and it raised. Every test up to that point used a system
+small enough to fit in a single chunk, including the cross-check against
+Biopython - so the "0.6 % agreement" was measured only on the easy path. The
+calculation now agrees with Biopython on a sixty-atom system too, and the
+chunked and unchunked results are asserted to be identical.
+
+### 12.9 What this is not
 
 Stated plainly, so it is not over-read:
 
@@ -1146,7 +1179,7 @@ Everything in this document was checked, not assumed.
 | Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
 | Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
-| Design package suite | `python -m pytest` (8 files) | **244 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 13 regression + 5 Biopython cross-check) |
+| Design package suite | `python -m pytest` (9 files) | **262 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 15 evaluation + 15 regression + 6 Biopython cross-check) |
 | Masking guarantees | Fixed residues after Euler, Heun and SDE integration, with a model that deliberately returns a velocity of 1e4 on the target | 0 fixed-residue velocity, 0 fixed-residue displacement, coordinates bit-identical (`torch.equal`) |
 | The masking tests have teeth | In-memory mutation: remove the velocity mask | the suite fails (9 tests). Removing the write-back changes no number, because a zero velocity is already a zero displacement - recorded in §12.3 as a correction rather than claimed as a second guarantee |
 | Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | 8 defects found, 8 fixed, 13 regression tests added; two claims in this document corrected (§12.3, and the mutation row above) |

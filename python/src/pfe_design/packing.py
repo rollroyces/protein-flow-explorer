@@ -26,6 +26,7 @@ from torch import Tensor, nn
 
 from .config import PackingBackend, PackingConfig
 from .metrics import clash_report
+from .sequences import sequence_from_residue_types
 
 __all__ = [
     "BackendUnavailableError",
@@ -60,6 +61,10 @@ class PackingRequest:
         1 for the residues that must not move (the target), ``(N,)``.
     config:
         The packing settings.
+    sequence:
+        The single-letter sequence, when one is known.  A structure
+        predictor works from a sequence, not from residue-type indices, so
+        the request carries both.
     """
 
     backbone_xyz: Tensor
@@ -67,6 +72,7 @@ class PackingRequest:
     fixed_mask: Tensor
     config: PackingConfig
     metadata: dict = field(default_factory=dict)
+    sequence: str | None = None
 
     @property
     def n_residues(self) -> int:
@@ -327,7 +333,8 @@ class ESMFoldBackend(PackingBackendBase):
 
     ESMFold predicts a structure from a sequence, so it is used here to
     rebuild side chains for a designed region: a predictor callable receives
-    the backbone and returns coordinates.
+    the request - including :attr:`PackingRequest.sequence`, the single-letter
+    sequence written from the residue types - and returns coordinates.
     """
 
     name = "esmfold"
@@ -403,6 +410,7 @@ class SideChainPackingHook(nn.Module):
         residue_types: Tensor | None = None,
         fixed_mask: Tensor | None = None,
         metadata: dict | None = None,
+        sequence: str | None = None,
     ) -> PackingRequest:
         """Package generated coordinates for packing.
 
@@ -416,6 +424,10 @@ class SideChainPackingHook(nn.Module):
             1 for the residues that must not move, ``(N,)``.
         metadata:
             Free-form context passed through to the backend.
+        sequence:
+            The single-letter sequence.  When it is not given it is written
+            from the residue types, so a structure predictor always has
+            something to work from.
         """
         coords = backbone_xyz.to(torch.float64)
         if coords.dim() != 2 or coords.shape[1] != 3:
@@ -433,12 +445,15 @@ class SideChainPackingHook(nn.Module):
         fixed_mask = torch.as_tensor(fixed_mask).reshape(-1).to(torch.bool)
         if fixed_mask.shape[0] != n:
             raise ValueError("fixed_mask must have one entry per residue")
+        if sequence is None:
+            sequence = sequence_from_residue_types(residue_types.tolist())
         return PackingRequest(
             backbone_xyz=coords,
             residue_types=residue_types,
             fixed_mask=fixed_mask,
             config=self.cfg,
             metadata=dict(metadata or {}),
+            sequence=sequence,
         )
 
     # ----------------------------------------------------------------- refine

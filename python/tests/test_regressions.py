@@ -26,6 +26,11 @@ The defects, in the order they were found:
    coordinates.
 8. The integrator accepted a starting state whose residue count did not match
    the conditioning, and accepted a target that was somewhere else entirely.
+9. The surface-area calculation only worked for systems of thirty-two atoms
+   or fewer: the self-occlusion mask was built on the chunk axis instead of
+   the atom axis, so the moment a system needed more than one chunk the
+   shapes stopped matching and it raised. Every earlier test used a system
+   small enough to fit in one chunk.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ from pfe_design import (
     integrate,
 )
 from pfe_design.conditioning import PocketConditioner
+from pfe_design.metrics import sasa
 from pfe_design.vector_field import BackboneVelocityField
 
 
@@ -328,3 +334,40 @@ def test_the_integrator_refuses_a_target_that_is_somewhere_else():
             cond,
             FlowIntegrationConfig(n_steps=2),
         )
+
+
+# 9 - the surface-area calculation must not depend on the chunk size
+
+
+def test_sasa_is_the_same_however_the_atoms_are_chunked():
+    """A system larger than one chunk must give the same answer.
+
+    The self-occlusion mask used to be built on the chunk axis rather than
+    the atom axis, so the calculation only worked while the whole system
+    fitted in a single chunk - which every small test did.
+    """
+    generator = torch.Generator().manual_seed(5)
+    coords = torch.randn((80, 3), generator=generator, dtype=torch.float64) * 4.0
+    radii = torch.full((80,), 1.70, dtype=torch.float64)
+
+    one_chunk = sasa(coords, radii, 1.4, 60, chunk=256)
+    many_chunks = sasa(coords, radii, 1.4, 60, chunk=8)
+
+    assert one_chunk.shape == (80,)
+    assert torch.allclose(one_chunk, many_chunks, atol=1e-9)
+
+
+def test_sasa_handles_a_system_larger_than_one_chunk():
+    """A hundred atoms is a small protein, and it has to work."""
+    generator = torch.Generator().manual_seed(6)
+    coords = torch.randn((100, 3), generator=generator, dtype=torch.float64) * 5.0
+    radii = torch.full((100,), 1.70, dtype=torch.float64)
+
+    values = sasa(coords, radii, 1.4, 50)
+
+    assert values.shape == (100,)
+    assert bool((values >= 0).all())
+    assert bool(torch.isfinite(values).all())
+    # A densely packed random cloud has atoms that are completely buried, so
+    # a zero area is legitimate; the total is not.
+    assert float(values.sum()) > 0.0
