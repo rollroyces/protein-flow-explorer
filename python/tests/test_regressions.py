@@ -31,6 +31,21 @@ The defects, in the order they were found:
    the atom axis, so the moment a system needed more than one chunk the
    shapes stopped matching and it raised. Every earlier test used a system
    small enough to fit in one chunk.
+
+A second review round found six more:
+
+10. A backend that returned NaN was scored as a perfect zero (a NaN
+    comparison is false, so nothing counted as a clash) and accepted.
+11. A backend could move the rigid target, and its result was returned as
+    it came.
+12. The sequence helper read "MET" as one three-letter residue instead of
+    three one-letter residues.
+13. A float64 structure produced a torch-internal dtype error in the
+    conditioner.
+14. An empty interface or ligand was reported as a perfect 0.0 rather than
+    as a measurement that could not be made.
+15. Two partner groups that overlapped gave the burial of a group against
+    itself.
 """
 
 from __future__ import annotations
@@ -51,7 +66,7 @@ from pfe_design import (
 )
 from pfe_design.conditioning import PocketConditioner
 from pfe_design.metrics import sasa
-from pfe_design.vector_field import BackboneVelocityField
+from pfe_design.vector_field import BackboneVelocityField, PairwiseBiasAttention, rbf_features
 
 
 def _target(n_target: int = 4) -> torch.Tensor:
@@ -123,11 +138,18 @@ def test_the_integrator_rejects_a_fractional_mask():
 
 
 def test_stochastic_heun_differs_from_deterministic_heun():
-    """The diffusion term has to reach the update, not only the predictor."""
+    """The diffusion term has to reach the update, not only the predictor.
+
+    The model must not depend on its input: an input-dependent model would
+    carry the noise into the trajectory through the corrected velocity, and
+    the test would pass even with the diffusion term removed from the
+    update - which is the defect it is supposed to catch.
+    """
     cond, target, _ = _conditioning()
     x0 = torch.cat([target, torch.randn(1, 3, 3)], dim=1)
+
     def model(x, rt, c):
-        return x * 0.1 + 1.0
+        return torch.ones_like(x)
 
     deterministic = integrate(
         x0, model, cond, FlowIntegrationConfig(n_steps=5, step_size=0.1, solver=Solver.HEUN)
@@ -214,28 +236,52 @@ def test_the_raw_velocity_diagnostic_reports_what_the_model_wanted():
 
 
 def test_a_batch_members_pocket_is_independent_of_its_neighbours():
-    """The fallback for an empty pocket is applied per structure."""
-    near = torch.tensor([[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0], [6.0, 0.0, 0.0]]])
-    far = near + 100.0
-    design_far = far + 0.5
-    design_near = near + 0.5
+    """The fallback for an empty pocket is applied per structure.
 
-    batched_target = torch.cat([near, near], dim=0)
-    batched_complex = torch.cat(
-        [batched_target, torch.cat([design_far, design_near], dim=0)[:, :3]], dim=1
-    )
+    The geometry has to discriminate: the first member's design region is
+    nowhere near its target, so its pocket falls back to the target's
+    centroid, while the second member's design region sits against one end
+    of its target, so its pocket is that end and not the centroid. A
+    fallback applied to the whole batch would move one of them.
+    """
+    target = torch.tensor(
+        [[[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [20.0, 0.0, 0.0], [30.0, 0.0, 0.0]]]
+    ).repeat(2, 1, 1)
+    far = torch.tensor([[[100.0, 0.0, 0.0], [101.0, 0.0, 0.0], [102.0, 0.0, 0.0]]])
+    near = torch.tensor([[[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0]]])
+    design = torch.cat([far, near], dim=0)
+    complex_xyz = torch.cat([target, design], dim=1)
     mask = build_complex_mask(4, 3, batch_size=2)
     conditioner = PocketConditioner()
 
     batched = conditioner(
-        batched_target, torch.ones(2, 4), mask, complex_xyz=batched_complex
-    )
-    solo = conditioner(
-        near, torch.ones(1, 4), mask[:1], complex_xyz=batched_complex[:1]
+        target, torch.ones(2, 4), mask, complex_xyz=complex_xyz
     )
 
-    assert torch.allclose(batched.pocket_center[0], solo.pocket_center[0])
-    assert int(batched.pocket_mask[0].sum()) > 0
+    # The first member falls back to the centroid of its target...
+    assert torch.allclose(
+        batched.pocket_center[0], target[0].mean(dim=0), atol=1e-5
+    )
+    # ...and the second member's pocket is at the end the design sits against,
+    # which is not the centroid.
+    assert not torch.allclose(
+        batched.pocket_center[1], target[1].mean(dim=0), atol=1e-3
+    )
+
+    # Each member must agree with the same complex on its own.
+    for index in range(2):
+        solo = conditioner(
+            target[index : index + 1],
+            torch.ones(1, 4),
+            mask[index : index + 1],
+            complex_xyz=complex_xyz[index : index + 1],
+        )
+        assert torch.allclose(
+            batched.pocket_center[index], solo.pocket_center[0], atol=1e-5
+        )
+        assert int(batched.pocket_mask[index].sum()) == int(
+            solo.pocket_mask[0].sum()
+        )
 
 
 # 5 - the buried surface area has to stay physical
@@ -286,15 +332,19 @@ def test_per_structure_radii_are_not_broadcast_against_the_wrong_axis():
     coords = torch.stack(
         [torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]], dtype=torch.float64)] * 2
     )
-    radii = torch.full((2, 2), 1.7, dtype=torch.float64)
+    # The two structures must have different radii, or a wrong slice of the
+    # radii would go unnoticed.
+    radii = torch.tensor([[1.7, 1.7], [2.4, 2.4]], dtype=torch.float64)
 
     values = clash_penalty(
         coords, MetricConfig(clash_distance=2.0, clash_mode="vdw"), radii=radii
     )
 
     assert values.shape == (2,)
-    assert float(values[0]) == pytest.approx(4.0, rel=1e-9)
-    assert float(values[1]) == pytest.approx(4.0, rel=1e-9)
+    # Overlap = r_i + r_j - tolerance - distance = 1.7 + 1.7 - 0.4 - 1.0
+    assert float(values[0]) == pytest.approx(2.0 ** 2, rel=1e-9)
+    # Overlap = 2.4 + 2.4 - 0.4 - 1.0
+    assert float(values[1]) == pytest.approx(3.4 ** 2, rel=1e-9)
 
 
 # 7 - an unmodelled residue must not reach the modelled ones
@@ -389,3 +439,57 @@ def test_sasa_handles_a_system_larger_than_one_chunk():
     # A densely packed random cloud has atoms that are completely buried, so
     # a zero area is legitimate; the total is not.
     assert float(values.sum()) > 0.0
+
+
+def test_the_pair_value_term_ignores_the_masked_pairs_entirely():
+    """The masked pairs must contribute nothing, not even the layer's bias.
+
+    With the pair-value sum taken before the mask, each masked pair added
+    the layer's own bias to the average, so the number of masked pairs -
+    the number of unmodelled residues - shifted the result for the residues
+    that are modelled.
+
+    The test is at the layer, because at the level of the whole field the
+    conditioning itself depends on which residues are modelled, and the two
+    effects cannot be told apart there.
+    """
+    torch.manual_seed(0)
+    attention = PairwiseBiasAttention(hidden_dim=8, n_heads=2, n_rbf_bins=4)
+    h = torch.randn(1, 3, 8)
+    features_a = rbf_features(torch.rand(1, 3, 3), 4, 20.0)
+    features_b = features_a.clone()
+    # The third key is masked out; change the pair features that involve it.
+    features_b[0, :, 2] = rbf_features(torch.rand(1, 3), 4, 20.0)
+
+    pair_mask = torch.tensor([[[True, True, False]]])
+    key_mask = torch.tensor([[True, True, False]])
+
+    out_a = attention(h, features_a, key_mask, pair_mask)
+    out_b = attention(h, features_b, key_mask, pair_mask)
+
+    assert torch.allclose(out_a, out_b, atol=1e-7)
+
+
+# 10 - a backend that returns nonsense must not be accepted
+
+
+def test_a_float64_target_is_accepted():
+    """The conditioner used to fail with a torch-internal dtype error."""
+    target = torch.randn(1, 4, 3, dtype=torch.float64)
+    valid = torch.ones(1, 4, dtype=torch.float64)
+    mask = build_complex_mask(4, 3, batch_size=1, dtype=torch.float64)
+
+    cond = PocketConditioner()(target, valid, mask)
+
+    assert cond.context.shape[:2] == (1, 7)
+    assert bool(torch.isfinite(cond.context).all())
+
+
+def test_a_target_with_no_modelled_residue_is_refused():
+    """There is nothing to condition on, and the pocket would be the origin."""
+    target = torch.randn(1, 4, 3)
+    valid = torch.zeros(1, 4)
+    mask = build_complex_mask(4, 3, batch_size=1)
+
+    with pytest.raises(ValueError, match="no modelled residue"):
+        PocketConditioner()(target, valid, mask)

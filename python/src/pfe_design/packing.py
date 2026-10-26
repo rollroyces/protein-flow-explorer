@@ -101,6 +101,9 @@ class PackingResult:
     accepted_backend: bool = False
     """Whether the backend result was kept (it may have been rejected)."""
 
+    rejection: str | None = None
+    """Why a backend result was discarded, when it was."""
+
     @property
     def improved(self) -> bool:
         """True when the hook reduced the clash penalty."""
@@ -502,23 +505,51 @@ class SideChainPackingHook(nn.Module):
 
         backend_used: str | None = None
         accepted = False
+        rejection: str | None = None
         final = refined
         final_penalty = refined_penalty
 
         if self.backend is not None and self.backend.available():
-            backend_request = replace(request, backbone_xyz=refined)
+            # The backend is told which residues it may move. When the
+            # refinement was allowed to move them, the backend must be told
+            # the same thing, or it will hold residues that were supposed to
+            # move.
+            backend_fixed = (
+                request.fixed_mask
+                if self.cfg.keep_fixed_residues
+                else torch.zeros_like(request.fixed_mask)
+            )
+            backend_request = replace(
+                request, backbone_xyz=refined, fixed_mask=backend_fixed
+            )
             try:
                 packed = self.backend.pack(backend_request)
             except BackendUnavailableError:
                 packed = None
             if packed is not None:
                 packed = packed.to(torch.float64)
-                packed_penalty = clash_report(packed, metric_cfg).penalty
-                backend_used = self.backend.name
-                if (not self.cfg.reject_worse) or packed_penalty <= final_penalty:
-                    final = packed
-                    final_penalty = packed_penalty
-                    accepted = True
+                reason = _reject_reason(packed, request)
+                if reason is None:
+                    packed_penalty = clash_report(packed, metric_cfg).penalty
+                    backend_used = self.backend.name
+                    if (not self.cfg.reject_worse) or packed_penalty <= final_penalty:
+                        # The target is rigid: whatever the backend did to it
+                        # is put back, so the guarantee the caller sees is the
+                        # same one the refinement honoured.
+                        final = (
+                            _restore_fixed(packed, request)
+                            if self.cfg.keep_fixed_residues
+                            else packed
+                        )
+                        final_penalty = clash_report(final, metric_cfg).penalty
+                        accepted = True
+                else:
+                    # A backend that returns something unusable - a diverged
+                    # minimisation, a NaN coordinate - must not be scored as
+                    # a perfect zero and accepted. It is discarded, and the
+                    # reason is recorded.
+                    backend_used = self.backend.name
+                    rejection = reason
 
         return PackingResult(
             coordinates=final,
@@ -527,7 +558,39 @@ class SideChainPackingHook(nn.Module):
             iterations=iterations,
             backend_used=backend_used,
             accepted_backend=accepted,
+            rejection=rejection,
         )
+
+
+def _reject_reason(coords: Tensor, request: PackingRequest) -> str | None:
+    """Why a backend result cannot be used, or ``None`` if it can.
+
+    A backend that diverged returns NaN coordinates, and a NaN comparison is
+    false, so a naive clash score would call a diverged structure perfectly
+    clash-free and accept it. The result is checked before it is scored.
+    """
+    if coords.shape != request.backbone_xyz.shape:
+        return (
+            f"the backend returned {tuple(coords.shape)} coordinates, expected "
+            f"{tuple(request.backbone_xyz.shape)}"
+        )
+    if not bool(torch.isfinite(coords).all()):
+        return "the backend returned non-finite coordinates"
+    return None
+
+
+def _restore_fixed(coords: Tensor, request: PackingRequest) -> Tensor:
+    """Put the fixed residues back where they were.
+
+    The target is rigid. A backend that moved it has its result corrected,
+    because the guarantee the caller was promised is about the coordinates
+    that come out of this hook.
+    """
+    fixed = request.fixed_mask.to(torch.bool)
+    if not bool(fixed.any()):
+        return coords
+    original = request.backbone_xyz.to(coords.dtype)
+    return torch.where(fixed.unsqueeze(-1), original, coords)
 
 
 def _metric_config(cfg: PackingConfig):

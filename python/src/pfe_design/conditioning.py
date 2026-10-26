@@ -330,6 +330,11 @@ class PocketConditioner(nn.Module):
                 "0 = fixed target); a fractional value is read as a weight by "
                 "one constraint and as a flag by the other"
             )
+        if not bool(target_valid.to(torch.bool).any()):
+            raise ValueError(
+                "the target has no modelled residue; there is nothing to "
+                "condition on"
+            )
 
         device = target_xyz.device
         dtype = target_xyz.dtype
@@ -398,7 +403,11 @@ class PocketConditioner(nn.Module):
             ],
             dim=-1,
         )
-        context = self.dropout(self.feature_mlp(features))
+        # The feature MLP runs in the module's own dtype: a caller who hands
+        # over float64 coordinates should not get a torch-internal error about
+        # mismatched dtypes.
+        parameter_dtype = self.feature_mlp[0].weight.dtype
+        context = self.dropout(self.feature_mlp(features.to(parameter_dtype)))
 
         fixed_xyz = target_xyz.new_zeros((batch, n_complex, 3))
         fixed_xyz[:, :n_target] = target_xyz

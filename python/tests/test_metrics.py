@@ -263,7 +263,7 @@ def test_interface_rmsd_is_zero_for_identical_structures():
     assert float(value) == pytest.approx(0.0, abs=1e-12)
 
 
-def test_interface_rmsd_returns_zero_for_an_empty_interface():
+def test_interface_rmsd_is_not_a_number_for_an_empty_interface():
     """No interface atoms means there is nothing to measure."""
     torch.manual_seed(0)
     coords, _iface = _complex(seed=24)
@@ -271,7 +271,9 @@ def test_interface_rmsd_returns_zero_for_an_empty_interface():
 
     value = interface_rmsd(coords, coords, empty)
 
-    assert float(value) == pytest.approx(0.0, abs=1e-12)
+    # A zero here would be a perfect score for a measurement that was never
+    # made.
+    assert math.isnan(float(value))
 
 
 def test_interface_rmsd_accepts_unbatched_input():
@@ -364,7 +366,7 @@ def test_ligand_rmsd_is_zero_for_a_rigid_motion_of_the_whole_complex():
     assert float(value) == pytest.approx(0.0, abs=1e-9)
 
 
-def test_ligand_rmsd_returns_zero_for_an_empty_ligand_mask():
+def test_ligand_rmsd_is_not_a_number_for_an_empty_ligand_mask():
     """Without a ligand there is nothing to measure."""
     torch.manual_seed(0)
     coords = _points(12, seed=32, scale=8.0)
@@ -373,7 +375,7 @@ def test_ligand_rmsd_returns_zero_for_an_empty_ligand_mask():
 
     value = ligand_rmsd(coords, coords, receptor, empty)
 
-    assert float(value) == pytest.approx(0.0, abs=1e-12)
+    assert math.isnan(float(value))
 
 
 def test_ligand_rmsd_batched_matches_unbatched():

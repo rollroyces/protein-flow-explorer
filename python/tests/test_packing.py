@@ -561,3 +561,92 @@ def test_esmfold_backend_uses_an_injected_predictor():
     assert len(seen) == 1
     assert seen[0] is request
     assert torch.allclose(packed, request.backbone_xyz - 2.0)
+
+
+def test_a_backend_that_returns_nan_is_discarded():
+    """A diverged minimisation must not be scored as a perfect zero.
+
+    A NaN comparison is false, so a clash score computed on NaN coordinates
+    comes out as 0.0 - "perfectly clash-free" - and a naive hook would
+    accept a structure that has fallen apart.
+    """
+    import torch
+
+    from pfe_design.packing import PackingBackendBase
+
+    class NanBackend(PackingBackendBase):
+        name = "nan"
+
+        @classmethod
+        def available(cls) -> bool:
+            return True
+
+        def pack(self, request):
+            return torch.full_like(request.backbone_xyz, float("nan"))
+
+    coords = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.9]], dtype=torch.float64)
+    hook = SideChainPackingHook(PackingConfig(), backend=NanBackend())
+    request = hook.prepare(coords, torch.zeros(2, dtype=torch.long))
+
+    result = hook(request)
+
+    assert result.accepted_backend is False
+    assert result.rejection is not None and "non-finite" in result.rejection
+    assert bool(torch.isfinite(result.coordinates).all())
+    # The coordinates are the refined ones, not the backend's NaNs.
+    assert bool(torch.isfinite(result.coordinates).all())
+
+
+def test_a_backend_that_returns_the_wrong_shape_is_discarded():
+    """A backend that returns something else is not scored at all."""
+    import torch
+
+    from pfe_design.packing import PackingBackendBase
+
+    class WrongShapeBackend(PackingBackendBase):
+        name = "wrong-shape"
+
+        @classmethod
+        def available(cls) -> bool:
+            return True
+
+        def pack(self, request):
+            return request.backbone_xyz[:1]
+
+    coords = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.9]], dtype=torch.float64)
+    hook = SideChainPackingHook(PackingConfig(), backend=WrongShapeBackend())
+    request = hook.prepare(coords, torch.zeros(2, dtype=torch.long))
+
+    result = hook(request)
+
+    assert result.accepted_backend is False
+    assert result.rejection is not None and "expected" in result.rejection
+
+
+def test_a_backend_cannot_move_the_fixed_residues():
+    """The target is rigid: what comes out of the hook keeps it in place."""
+    import torch
+
+    from pfe_design.packing import PackingBackendBase
+
+    class DriftingBackend(PackingBackendBase):
+        name = "drifting"
+
+        @classmethod
+        def available(cls) -> bool:
+            return True
+
+        def pack(self, request):
+            moved = request.backbone_xyz + 5.0
+            return moved
+
+    coords = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.9], [0.0, 0.0, 4.0]],
+                           dtype=torch.float64)
+    fixed = torch.tensor([True, False, False])
+    hook = SideChainPackingHook(PackingConfig(), backend=DriftingBackend())
+    request = hook.prepare(coords, torch.zeros(3, dtype=torch.long), fixed)
+
+    result = hook(request)
+
+    assert result.accepted_backend is True
+    assert torch.equal(result.coordinates[0], coords[0])

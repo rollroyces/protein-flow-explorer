@@ -53,14 +53,17 @@ def test_three_letter_codes_are_accepted():
 
 def test_modified_residues_become_the_residue_they_derive_from():
     """A predictor cannot be asked about MSE; it can be asked about MET."""
-    assert canonical_sequence("MSE") == "M"
-    assert canonical_sequence("SEC") == "C"
-    assert canonical_sequence("PYL") == "K"
+    assert canonical_sequence("MSE", format="three-letter") == "M"
+    assert canonical_sequence("SEC", format="three-letter") == "C"
+    assert canonical_sequence("PYL", format="three-letter") == "K"
+    # Separated codes are unambiguous, so the default reads them the same way.
+    assert canonical_sequence("MSE ALA") == "MA"
 
 
 def test_ambiguous_residues_become_x():
     """ASX and GLX have no single-letter equivalent."""
     assert canonical_sequence("UNK ASX GLX") == "XXX"
+    assert canonical_sequence("UNK", format="three-letter") == "X"
 
 
 def test_whitespace_in_a_sequence_is_ignored():
@@ -207,3 +210,83 @@ def test_evaluate_complex_refuses_a_batch():
 
     with pytest.raises(ValueError, match="one complex"):
         evaluate_complex(target.unsqueeze(0), target.unsqueeze(0), interface.unsqueeze(0))
+
+
+def test_a_one_letter_sequence_is_not_read_as_three_letter_codes():
+    """Every three-letter code is also a run of three one-letter codes.
+
+    'MET' is one residue written in three-letter form and three residues
+    written in one-letter form, and reading it the wrong way changes the
+    length of the sequence - which is the sequence a predictor is given.
+    """
+    assert canonical_sequence("MET") == "MET"
+    assert len(residue_types_from_sequence("MET")) == 3
+    assert canonical_sequence("METAL") == "METAL"
+    assert canonical_sequence("SERINE") == "SERINE"
+    assert canonical_sequence("GLYCINE") == "GLYCINE"
+
+
+def test_a_three_letter_sequence_is_read_as_three_letter_codes():
+    """Separated codes are unambiguous, so they are read that way."""
+    assert canonical_sequence("MSE ALA SEC GLY") == "MACG"
+    assert canonical_sequence("ALA GLY SER") == "AGS"
+    assert canonical_sequence("MSE,ALA") == "MA"
+
+
+def test_the_format_can_be_stated_explicitly():
+    """A caller who knows the format does not have to rely on the guess."""
+    assert canonical_sequence("ALAGLYSER", format="three-letter") == "AGS"
+    assert canonical_sequence("ALAGLYSER", format="one-letter") == "ALAGLYSER"
+    assert canonical_sequence("MSE ALA", format="one-letter") == "MSEALA"
+
+
+def test_an_unknown_format_is_refused():
+    """A typo in the format must not be silently ignored."""
+    with pytest.raises(ValueError, match="unknown sequence format"):
+        residue_types_from_sequence("ACDEF", format="guess")
+
+
+def test_two_overlapping_partners_are_refused():
+    """A group cannot bury itself.
+
+    With overlapping groups the union collapses to one of them, and the
+    burial comes out as that group's own surface - a large positive number
+    for a pair of molecules that are really one.
+    """
+    generator = torch.Generator().manual_seed(2)
+    coords = torch.randn((8, 3), generator=generator, dtype=torch.float64) * 3.0
+    radii = torch.full((8,), 1.70, dtype=torch.float64)
+
+    with pytest.raises(ValueError, match="cannot bury itself"):
+        from pfe_design.metrics import buried_surface_area
+
+        buried_surface_area(coords, radii, torch.arange(5), torch.arange(3, 8))
+
+
+def test_an_empty_interface_is_reported_as_not_measurable():
+    """The facade reports None rather than a perfect zero."""
+    target, interface, receptor, ligand, group_a, group_b = _complex()
+    empty = torch.zeros_like(interface)
+
+    result = evaluate_complex(target, target, empty)
+
+    assert result.irmsd is None
+
+
+def test_the_ligand_is_never_part_of_its_own_fit():
+    """Without an explicit receptor, the ligand is excluded from the fit.
+
+    The ligand is measured by the receptor's fit, so letting the ligand
+    into the fit would let it follow itself and report a perfect score.
+    """
+    target, interface, receptor, ligand, group_a, group_b = _complex()
+    moved = target.clone()
+    moved[26:] += torch.tensor([0.0, 3.0, 0.0], dtype=torch.float64)   # the ligand moves
+
+    implicit = evaluate_complex(moved, target, interface, ligand_mask=ligand)
+    explicit = evaluate_complex(
+        moved, target, interface, receptor_mask=receptor, ligand_mask=ligand
+    )
+
+    assert implicit.ligand_rmsd == pytest.approx(3.0, rel=1e-6)
+    assert explicit.ligand_rmsd == pytest.approx(3.0, rel=1e-6)

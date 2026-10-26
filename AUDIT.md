@@ -1091,7 +1091,10 @@ rather than guessed at.
 `evaluate_complex` is the façade: one call, one result object, with the
 interface RMSD, the ligand RMSD, the buried area and the clash count
 together. Writing it is what surfaced the chunking defect in §12.8 - the
-first test with a complex larger than thirty-two atoms broke it.
+first test with a complex larger than thirty-two atoms broke it. The façade
+also refuses to let the ligand join the fit it is measured against: the
+ligand is carried by the receptor's fit, so letting it into the fit would
+let it follow itself and report a perfect score.
 
 ### 12.7 The defects this exposed
 
@@ -1141,6 +1144,38 @@ Biopython - so the "0.6 % agreement" was measured only on the easy path. The
 calculation now agrees with Biopython on a sixty-atom system too, and the
 chunked and unchunked results are asserted to be identical.
 
+A second review round, against the finished package, found six more defects and
+one methodological problem:
+
+| Defect | What it did | Fix |
+|---|---|---|
+| A NaN backend result | scored as a perfect zero, because a NaN comparison is false and nothing counted as a clash, and then accepted as an improvement | the backend's output is checked for finiteness and shape before it is scored, and the reason it was discarded is recorded |
+| A backend that moved the target | its coordinates were returned as they came, so the guarantee about the rigid target did not survive the hook | the fixed residues are put back on the accepted result |
+| The sequence helper | read "MET" as one three-letter residue rather than three one-letter residues - every three-letter code is also a valid run of three one-letter codes, so the length of the sequence a predictor is given could change silently | the reading rule is explicit (separated codes mean three-letter; a single part means one-letter), and the format can be stated outright |
+| A float64 structure | produced a torch-internal dtype error inside the conditioner | the features are cast to the module's own dtype |
+| An empty interface or ligand | reported as a perfect 0.0 - a perfect score for a measurement that was never made | the metric reports "not a number", and the façade reports ``None`` |
+| Overlapping partner groups | gave the burial of a group against itself, because the union collapses | the overlap is refused |
+
+The methodological problem was worse than any of the six: **three of the
+defect-pinning regression tests could not fail when the defect was
+restored**. The stochastic-Heun test used a model that depended on its
+input, so the noise reached the trajectory through the corrected velocity and
+the test could not tell the two versions apart; the pocket test asserted
+only one member of a batch, with geometry that made the fallback and the
+pocket centroid coincide; the radii test gave both structures the same
+radii, so a wrong slice of the radii went unnoticed. All three are repaired,
+and each is now checked by restoring the defect in memory and confirming
+that the suite fails.
+
+The same round found that the newest fix - masking the invalid pairs before
+the pair-value sum, so that the layer's bias cannot leak through and make
+the number of unmodelled residues matter - was pinned by nothing at all. It
+is now pinned at the level of the attention layer, where the effect can be
+isolated from the conditioning.
+
+Every defect claimed fixed in this document now has a test that fails when
+the defect is restored. That is the standard the claims below are held to.
+
 ### 12.9 What this is not
 
 Stated plainly, so it is not over-read:
@@ -1186,11 +1221,12 @@ Everything in this document was checked, not assumed.
 | Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
 | Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
-| Design package suite | `python -m pytest` (9 files) | **266 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 15 evaluation + 15 regression + 10 Biopython cross-check) |
+| Design package suite | `python -m pytest` (9 files) | **279 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 41 packing + 22 evaluation + 18 regression + 10 Biopython cross-check) |
 | Masking guarantees | Fixed residues after Euler, Heun and SDE integration, with a model that deliberately returns a velocity of 1e4 on the target | 0 fixed-residue velocity, 0 fixed-residue displacement, coordinates bit-identical (`torch.equal`) |
 | The masking tests have teeth | In-memory mutation: remove the velocity mask | the suite fails (9 tests). Removing the write-back changes no number, because a zero velocity is already a zero displacement - recorded in §12.3 as a correction rather than claimed as a second guarantee |
-| Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | 8 defects found, 8 fixed, 13 regression tests added; two claims in this document corrected (§12.3, and the mutation row above) |
-| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and the two agree to 0.2 % on a buried area |
+| Every defect-pinning test can fail | The defect restored in memory, one at a time: the stochastic Heun diffusion, the batch-global pocket fallback, the wrong radii slice, the unmasked pair value, the chunked SASA, the whole-complex BSA | each mutation fails the suite; the three tests that could not fail have been repaired |
+| Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | two rounds: 8 defects then 6 more, all fixed, with the vacuous tests found and repaired; several claims in this document corrected |
+| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and on a buried area the two agree to 0.9-1.3 % on the cases in the suite |
 | Design package lint | `ruff check python` (`E,F,W,I,UP,B`) | 0 errors |
 | The static site is unaffected | `npm test` and `npm run check` after adding the package | 1,316 assertions, 0 failed; 21 syntax checks clean — unchanged |
 | Deployment | GitHub Actions on push to `main` | green |

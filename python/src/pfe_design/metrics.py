@@ -190,9 +190,10 @@ class ComplexEvaluation:
     ----------
     irmsd:
         Interface RMSD after superposing on the receptor, in Angstrom.
+        ``None`` when there is no interface to measure.
     ligand_rmsd:
         Ligand RMSD after the same superposition, in Angstrom.  ``None`` when
-        no ligand was given.
+        no ligand was given, or when the ligand mask is empty.
     bsa:
         Buried surface area on complex formation, in square Angstrom.
         ``None`` when the two partner groups were not given.
@@ -270,14 +271,22 @@ def evaluate_complex(
         )
     cfg = cfg or MetricConfig()
 
-    irmsd = float(interface_rmsd(mobile, target, interface_mask, receptor_mask=receptor_mask))
+    irmsd_value = interface_rmsd(mobile, target, interface_mask, receptor_mask=receptor_mask)
+    irmsd = float(irmsd_value) if bool(torch.isfinite(irmsd_value).all()) else None
 
     ligand_value: float | None = None
     if ligand_mask is not None:
         fit = receptor_mask
         if fit is None:
-            fit = ~_as_batch(interface_mask, 1, mobile.shape[0])[0]
-        ligand_value = float(ligand_rmsd(mobile, target, fit, ligand_mask))
+            # Without an explicit receptor, the fit uses everything that is
+            # neither the interface nor the ligand - the ligand must not be
+            # part of the fit it is measured against.
+            fit = ~(
+                _as_batch(interface_mask, 1, mobile.shape[0])[0]
+                | _as_batch(ligand_mask, 1, mobile.shape[0])[0]
+            )
+        measured = ligand_rmsd(mobile, target, fit, ligand_mask)
+        ligand_value = float(measured) if bool(torch.isfinite(measured).all()) else None
 
     bsa_value: float | None = None
     if group_a is not None and group_b is not None:
@@ -298,6 +307,10 @@ def evaluate_complex(
 
 def _as_batch(mask: Tensor, batch: int, n: int) -> Tensor:
     if mask.dim() == 1:
+        if mask.shape[0] != n:
+            raise ValueError(
+                f"mask must have shape ({batch}, {n}) or ({n},); got {tuple(mask.shape)}"
+            )
         mask = mask.unsqueeze(0).expand(batch, n)
     if mask.shape != (batch, n):
         raise ValueError(
@@ -378,10 +391,13 @@ def interface_rmsd(
 
     values = []
     for b in range(batch):
-        moved, _r, _t = _fit_subset(m[b], t[b], selection[b])
         if int(iface[b].sum()) == 0:
-            values.append(torch.zeros((), dtype=m.dtype, device=m.device))
+            # There is no interface, so there is nothing to measure. A zero
+            # here would be a perfect score for a measurement that was never
+            # made, so it is reported as not-a-number.
+            values.append(torch.full((), float("nan"), dtype=m.dtype, device=m.device))
             continue
+        moved, _r, _t = _fit_subset(m[b], t[b], selection[b])
         delta = moved[iface[b]] - t[b][iface[b]]
         rmsd = torch.sqrt((delta ** 2).sum(dim=-1).mean())
         values.append(rmsd)
@@ -418,10 +434,11 @@ def ligand_rmsd(
 
     values = []
     for b in range(batch):
-        moved, _r, _t = _fit_subset(m[b], t[b], receptor[b])
         if int(ligand[b].sum()) == 0:
-            values.append(torch.zeros((), dtype=m.dtype, device=m.device))
+            # No ligand, so no ligand RMSD - not a perfect zero.
+            values.append(torch.full((), float("nan"), dtype=m.dtype, device=m.device))
             continue
+        moved, _r, _t = _fit_subset(m[b], t[b], receptor[b])
         delta = moved[ligand[b]] - t[b][ligand[b]]
         values.append(torch.sqrt((delta ** 2).sum(dim=-1).mean()))
     out = torch.stack(values)
@@ -642,6 +659,11 @@ def buried_surface_area(
     complex_radii = complex_radii.to(torch.float64)
     idx_a = torch.as_tensor(group_a, dtype=torch.long).reshape(-1)
     idx_b = torch.as_tensor(group_b, dtype=torch.long).reshape(-1)
+    if bool(torch.isin(idx_a, idx_b).any()):
+        raise ValueError(
+            "the two partner groups share atoms; a group cannot bury itself. "
+            "Give the burial of A against B, with the partners disjoint."
+        )
 
     # The complex term is the surface of the two partners together.  Atoms
     # outside both groups (ions, a third chain) are not part of the burial of

@@ -167,7 +167,8 @@ print(report.irmsd, report.ligand_rmsd, report.bsa, report.n_clashes)
 ```
 
 A measurement that needs a piece of information you did not supply is
-reported as `None` rather than guessed at.
+reported as `None` rather than guessed at — and so is one that could not be
+made: an empty interface gives `None`, not a perfect zero.
 
 The superposition helpers return the rotation and translation as well as the
 aligned coordinates, so a ligand can be carried along with the receptor fit
@@ -192,7 +193,7 @@ bsa = buried_surface_area(coords, radii, group_a, group_b,
                           implementation="biopython", elements=elements)
 ```
 
-The two agree to about 0.2 % on a buried area — the difference is spherical
+On a buried area the two agree to 0.9-1.3 % — the difference is spherical
 sampling noise, and it shrinks as the sampling is refined, which is how you
 tell sampling noise apart from a systematic error. The cross-check in the test
 -suite makes that argument explicitly, at two system sizes.
@@ -235,6 +236,13 @@ request.sequence          # 'ACDEFGHIKL'
 Index 0 is unknown and is written as `X`; the modified residues a structure
 file may carry (MSE, SEC, PYL, …) are mapped onto the residue they derive
 from.
+
+Reading a sequence is ambiguous in one place, and the rule is explicit rather
+than guessed: every three-letter code is also a valid run of three one-letter
+codes, so `"MET"` is either one residue written in three-letter form or three
+residues written in one-letter form. Separated codes (`"MSE ALA SEC"`) are
+read as three-letter codes; a single part is read one letter per residue. Say
+which you meant with `format="three-letter"` or `format="one-letter"`.
 
 ## Layout
 
