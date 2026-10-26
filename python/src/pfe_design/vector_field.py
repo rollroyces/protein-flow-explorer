@@ -125,14 +125,16 @@ class PairwiseBiasAttention(nn.Module):
         # Pair-conditioned value term: one channel per hidden unit, averaged
         # over the neighbours of each query residue.  The average is taken
         # over the existing neighbours only, so an unmodelled residue does
-        # not dilute the term either.
-        pair_value = self.pair_value(rbf).sum(dim=2)
+        # not dilute the term either - and the invalid pairs are masked
+        # before the sum, so even the layer's own bias cannot leak through
+        # and make the number of unmodelled residues matter.
+        pair_value = self.pair_value(rbf)
         if pair_mask is not None:
+            pair_value = pair_value * pair_mask.unsqueeze(-1).to(pair_value.dtype)
             counts = pair_mask.sum(dim=2).clamp(min=1).to(pair_value.dtype)
-            pair_value = pair_value / counts.unsqueeze(-1)
         else:
-            pair_value = pair_value / n_res
-        out = out + pair_value
+            counts = float(n_res)
+        out = out + pair_value.sum(dim=2) / counts.unsqueeze(-1)
         return out
 
 

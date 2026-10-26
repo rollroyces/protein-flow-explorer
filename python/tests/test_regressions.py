@@ -58,6 +58,24 @@ def _target(n_target: int = 4) -> torch.Tensor:
     return torch.arange(n_target * 3, dtype=torch.float32).reshape(1, n_target, 3) * 2.0
 
 
+def _live_field(seed: int = 0):
+    """A field whose output layer is *not* zero.
+
+    A fresh field is the identity flow - it predicts exactly zero velocity -
+    so a test that compares two velocities of a fresh field compares two
+    arrays of zeros and passes without proving anything. These tests need a
+    field that reacts to its input.
+    """
+    torch.manual_seed(seed)
+    field = BackboneVelocityField(
+        ModelConfig(hidden_dim=32, n_layers=2, n_heads=4),
+        TargetConditioningConfig(feature_dim=16),
+    )
+    torch.nn.init.normal_(field.to_velocity.weight, std=0.1)
+    torch.nn.init.normal_(field.to_velocity.bias, std=0.1)
+    return field
+
+
 def _conditioning(n_target: int = 4, n_design: int = 3):
     target = _target(n_target)
     valid = torch.ones(1, n_target)
@@ -284,9 +302,7 @@ def test_per_structure_radii_are_not_broadcast_against_the_wrong_axis():
 
 def test_an_unmodelled_residue_cannot_change_the_modelled_velocities():
     """A residue that is not in the structure has no coordinates to speak of."""
-    torch.manual_seed(0)
-    model_cfg = ModelConfig(hidden_dim=32, n_layers=2, n_heads=4)
-    field = BackboneVelocityField(model_cfg, TargetConditioningConfig(feature_dim=16))
+    field = _live_field()
 
     target = torch.randn(1, 5, 3) * 5.0
     design = torch.randn(1, 3, 3)
@@ -300,6 +316,8 @@ def test_an_unmodelled_residue_cannot_change_the_modelled_velocities():
 
     velocity_near = field(near, None, cond)
     velocity_far = field(far, None, cond)
+
+    assert float(velocity_near.abs().max().detach()) > 1e-6
 
     modelled = [0, 1, 2, 3, 5, 6, 7]
     difference = (velocity_near - velocity_far).abs()[:, modelled].max()
