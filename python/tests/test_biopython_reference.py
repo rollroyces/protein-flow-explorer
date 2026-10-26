@@ -38,7 +38,11 @@ from Bio.PDB.Residue import Residue  # noqa: E402
 from Bio.PDB.Structure import Structure  # noqa: E402
 
 from pfe_design.config import MetricConfig  # noqa: E402
-from pfe_design.metrics import buried_surface_area, sasa  # noqa: E402
+from pfe_design.metrics import (  # noqa: E402
+    buried_surface_area,
+    sasa,
+    sasa_biopython,
+)
 
 
 def _biopython_sasa(coords, elements, n_points=100):
@@ -183,3 +187,65 @@ def test_sasa_agrees_with_biopython_for_a_system_larger_than_one_chunk():
     theirs = sum(_biopython_sasa(coords, elements, n_points=100))
 
     assert mine == pytest.approx(theirs, rel=0.02)
+
+
+def test_the_module_itself_can_use_biopython():
+    """The reference implementation is available from the metrics module.
+
+    The PyTorch calculation is the fast one; this is the reference, and a
+    user who wants the reference number rather than the fast one should be
+    able to have it without leaving the package.
+    """
+    coords, elements = _cluster(seed=4, n_atoms=24)
+    radii = _radii(elements)
+
+    mine = sasa_biopython(coords, elements, probe=1.4, n_points=100)
+    theirs = sasa(coords, radii, probe=1.4, n_points=100)
+
+    assert mine.shape == (24,)
+    assert float(mine.sum()) == pytest.approx(float(theirs.sum()), rel=0.02)
+
+
+def test_buried_surface_area_can_be_computed_by_biopython():
+    """Both implementations of the burial agree with each other."""
+    coords, elements = _cluster(seed=8, n_atoms=20)
+    radii = _radii(elements)
+    group_a = torch.arange(10)
+    group_b = torch.arange(10, 20)
+
+    fast = buried_surface_area(coords, radii, group_a, group_b, MetricConfig())
+    reference = buried_surface_area(
+        coords,
+        radii,
+        group_a,
+        group_b,
+        MetricConfig(),
+        implementation="biopython",
+        elements=elements,
+    )
+
+    assert reference.bsa == pytest.approx(fast.bsa, rel=0.02)
+
+
+def test_the_biopython_path_says_what_it_needs():
+    """Without the elements there is nothing to resolve a radius from."""
+    coords, elements = _cluster(seed=4, n_atoms=12)
+    radii = _radii(elements)
+
+    with pytest.raises(ValueError, match="elements"):
+        buried_surface_area(
+            coords,
+            radii,
+            torch.arange(6),
+            torch.arange(6, 12),
+            MetricConfig(),
+            implementation="biopython",
+        )
+
+
+def test_the_two_implementations_agree_on_an_empty_system():
+    """An empty structure has no area, in either implementation."""
+    empty = torch.zeros((0, 3), dtype=torch.float64)
+
+    assert sasa_biopython(empty, [], 1.4, 50).shape == (0,)
+    assert sasa(empty, torch.zeros(0, dtype=torch.float64), 1.4, 50).shape == (0,)

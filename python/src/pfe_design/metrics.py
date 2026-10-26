@@ -510,12 +510,108 @@ def sasa(
     return out
 
 
+def _biopython_structure(coords: Tensor, elements: Sequence[str]):
+    """Build a one-atom-per-residue Bio.PDB structure for the reference SASA.
+
+    Biopython resolves an atom's radius from its element, so the atoms are
+    given the elements they really are.  The radii table used here matches
+    Biopython's own for every element the two share.
+    """
+    try:
+        from Bio.PDB.Atom import Atom
+        from Bio.PDB.Chain import Chain
+        from Bio.PDB.Model import Model
+        from Bio.PDB.Residue import Residue
+        from Bio.PDB.Structure import Structure
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise RuntimeError(
+            "Biopython is not installed; install it with `pip install biopython` "
+            "or use the default PyTorch implementation"
+        ) from exc
+
+    structure = Structure("complex")
+    model = Model(0)
+    structure.add(model)
+    chain = Chain("A")
+    model.add(chain)
+    for index, (xyz, element) in enumerate(zip(coords, elements, strict=False)):
+        name = str(element).strip().upper() or "C"
+        residue = Residue((" ", index + 1, " "), name, "")
+        atom = Atom(
+            name=name,
+            coord=[float(v) for v in xyz],
+            bfactor=0.0,
+            occupancy=1.0,
+            altloc=" ",
+            fullname=name,
+            serial_number=index + 1,
+            element=name,
+        )
+        residue.add(atom)
+        chain.add(residue)
+    return structure
+
+
+def sasa_biopython(
+    coords: Tensor,
+    elements: Sequence[str],
+    probe: float = 1.4,
+    n_points: int = 100,
+) -> Tensor:
+    """Per-atom solvent-accessible surface area, from Biopython.
+
+    This is the reference implementation, kept beside the vectorised PyTorch
+    one so the two can be compared and so that a user who wants the reference
+    number rather than the fast one can have it.  Biopython is an optional
+    dependency; without it this raises a clear error rather than failing
+    obscurely.
+
+    Parameters
+    ----------
+    coords:
+        Atomic coordinates, ``(N, 3)``.
+    elements:
+        The element symbol of each atom, ``(N,)``.
+    probe:
+        Radius of the solvent probe, ``1.4`` Angstrom for water.
+    n_points:
+        Number of sphere points per atom.
+
+    Returns
+    -------
+    Tensor
+        Per-atom SASA in square Angstrom.
+    """
+    try:
+        from Bio.PDB.SASA import ShrakeRupley
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise RuntimeError(
+            "Biopython is not installed; install it with `pip install biopython` "
+            "or use the default PyTorch implementation"
+        ) from exc
+
+    if coords.shape[0] == 0:
+        # Biopython refuses an empty structure; the PyTorch path returns an
+        # empty tensor, and the two should agree.
+        return torch.zeros(0, dtype=torch.float64)
+
+    structure = _biopython_structure(coords, elements)
+    calculator = ShrakeRupley(probe_radius=probe, n_points=n_points)
+    calculator.compute(structure, level="R")
+    values = [
+        float(atom.sasa) for residue in structure.get_residues() for atom in residue
+    ]
+    return torch.tensor(values, dtype=torch.float64)
+
+
 def buried_surface_area(
     complex_coords: Tensor,
     complex_radii: Tensor,
     group_a: Tensor,
     group_b: Tensor,
     cfg: MetricConfig | None = None,
+    implementation: str = "torch",
+    elements: Sequence[str] | None = None,
 ) -> BSAResult:
     """Buried surface area on complex formation.
 
@@ -529,6 +625,13 @@ def buried_surface_area(
         Indices of the atoms belonging to each partner.
     cfg:
         Metric settings (probe radius, number of sphere points).
+    implementation:
+        ``"torch"`` (the default) uses the vectorised PyTorch calculation;
+        ``"biopython"`` uses Biopython's reference implementation and then
+        needs ``elements``.
+    elements:
+        The element symbol of each atom; required for the Biopython
+        implementation, which resolves radii from the element.
 
     Returns
     -------
@@ -546,24 +649,44 @@ def buried_surface_area(
     # in the limit, a large third group makes the "buried area" negative,
     # which is not a physical quantity.
     union = torch.unique(torch.cat([idx_a, idx_b]))
-    per_atom_union = sasa(
-        complex_coords[union],
-        complex_radii[union],
-        probe=cfg.bsa_probe_radius,
-        n_points=cfg.bsa_n_points,
-    )
-    free_a = sasa(
-        complex_coords[idx_a],
-        complex_radii[idx_a],
-        probe=cfg.bsa_probe_radius,
-        n_points=cfg.bsa_n_points,
-    ).sum()
-    free_b = sasa(
-        complex_coords[idx_b],
-        complex_radii[idx_b],
-        probe=cfg.bsa_probe_radius,
-        n_points=cfg.bsa_n_points,
-    ).sum()
+    if implementation == "biopython":
+        if elements is None:
+            raise ValueError(
+                "the Biopython implementation resolves radii from the element, "
+                "so the elements of every atom must be given"
+            )
+        element_list = [str(e) for e in elements]
+
+        def area_for(indices: Tensor) -> Tensor:
+            return sasa_biopython(
+                complex_coords[indices],
+                [element_list[i] for i in indices.tolist()],
+                probe=cfg.bsa_probe_radius,
+                n_points=cfg.bsa_n_points,
+            )
+
+        per_atom_union = area_for(union)
+        free_a = area_for(idx_a).sum()
+        free_b = area_for(idx_b).sum()
+    else:
+        per_atom_union = sasa(
+            complex_coords[union],
+            complex_radii[union],
+            probe=cfg.bsa_probe_radius,
+            n_points=cfg.bsa_n_points,
+        )
+        free_a = sasa(
+            complex_coords[idx_a],
+            complex_radii[idx_a],
+            probe=cfg.bsa_probe_radius,
+            n_points=cfg.bsa_n_points,
+        ).sum()
+        free_b = sasa(
+            complex_coords[idx_b],
+            complex_radii[idx_b],
+            probe=cfg.bsa_probe_radius,
+            n_points=cfg.bsa_n_points,
+        ).sum()
     sasa_complex = per_atom_union.sum()
     bsa = free_a + free_b - sasa_complex
 

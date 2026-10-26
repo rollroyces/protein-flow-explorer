@@ -53,6 +53,7 @@ from .metrics import (
     interface_rmsd,
     ligand_rmsd,
     sasa,
+    sasa_biopython,
     superpose,
     vdw_radii,
 )
@@ -118,6 +119,7 @@ __all__ = [
     "interface_rmsd",
     "ligand_rmsd",
     "sasa",
+    "sasa_biopython",
     "superpose",
     "vdw_radii",
     # sequences

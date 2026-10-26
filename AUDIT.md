@@ -1149,6 +1149,13 @@ Stated plainly, so it is not over-read:
   network with pair-biased attention and a conditioning path, and it is
   sized so the mask guarantees can be tested exactly, but it has not learned
   anything. There is no training loop here.
+* The practical consequence: the output layer is zero-initialised, so the
+  field predicts zero velocity and the flow is the identity. `sample_binder`
+  with the default model returns the complex it was given, with the designed
+  region exactly where it was seeded. Nothing in the package moves a
+  residue until the field is trained - what is here is the conditioning
+  contract, the constraint machinery and the measurement, and a user with a
+  trained field can drive all three from this API.
 * The pocket is geometric, not a learned binding site: it is the set of
   target residues lining the site the user points at.
 * No PDB-to-complex assembly is included; the package starts from coordinates.
@@ -1179,11 +1186,11 @@ Everything in this document was checked, not assumed.
 | Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
 | Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
-| Design package suite | `python -m pytest` (9 files) | **262 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 15 evaluation + 15 regression + 6 Biopython cross-check) |
+| Design package suite | `python -m pytest` (9 files) | **266 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 15 evaluation + 15 regression + 10 Biopython cross-check) |
 | Masking guarantees | Fixed residues after Euler, Heun and SDE integration, with a model that deliberately returns a velocity of 1e4 on the target | 0 fixed-residue velocity, 0 fixed-residue displacement, coordinates bit-identical (`torch.equal`) |
 | The masking tests have teeth | In-memory mutation: remove the velocity mask | the suite fails (9 tests). Removing the write-back changes no number, because a zero velocity is already a zero displacement - recorded in §12.3 as a correction rather than claimed as a second guarantee |
 | Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | 8 defects found, 8 fixed, 13 regression tests added; two claims in this document corrected (§12.3, and the mutation row above) |
-| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error |
+| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and the two agree to 0.2 % on a buried area |
 | Design package lint | `ruff check python` (`E,F,W,I,UP,B`) | 0 errors |
 | The static site is unaffected | `npm test` and `npm run check` after adding the package | 1,316 assertions, 0 failed; 21 syntax checks clean — unchanged |
 | Deployment | GitHub Actions on push to `main` | green |

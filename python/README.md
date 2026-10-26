@@ -12,6 +12,15 @@ prepares it for side-chain packing.
 It is a Python package that lives beside the site, not inside it: the site
 still has no build step and no runtime dependency.
 
+> **Read this before you run anything.** The vector field is an **untrained
+> reference implementation**: its output layer is zero-initialised, so it
+> predicts zero velocity and the flow is the identity. `sample_binder` with
+> the default model hands back the complex it was given. What this package
+> delivers is the *contract* — how a target and a mask condition a field, how
+> the target is held rigid during integration, and how the result is measured
+> — ready for a trained field to be dropped into. There is no training loop
+> here, and the package does not pretend otherwise.
+
 ## Install
 
 ```bash
@@ -170,12 +179,23 @@ naive docking scores.
 receptor explicitly: otherwise the ligand's own atoms join the fit and tilt
 it, and a displaced ligand changes the iRMSD of an interface that never moved.
 
-The surface-area implementation is cross-checked against Biopython's
-independent `Bio.PDB.SASA.ShrakeRupley`: the totals agree to 0.6 %, and the
-RMS per-atom error shrinks as the sampling is refined, which is the signature
-of sampling noise rather than a systematic error. That check runs only when
-Biopython is installed; the rest of the suite needs nothing beyond the
-declared dependencies.
+The surface-area calculation comes in two implementations. The default is the
+vectorised PyTorch one; Biopython's reference implementation is also reachable
+from the same module, for when you want the reference number rather than the
+fast one:
+
+```python
+from pfe_design import sasa_biopython
+
+per_atom = sasa_biopython(coords, elements)          # elements per atom
+bsa = buried_surface_area(coords, radii, group_a, group_b,
+                          implementation="biopython", elements=elements)
+```
+
+The two agree to about 0.2 % on a buried area — the difference is spherical
+sampling noise, and it shrinks as the sampling is refined, which is how you
+tell sampling noise apart from a systematic error. The cross-check in the test
+-suite makes that argument explicitly, at two system sizes.
 
 The buried area is the burial of the two partners *against each other*: the
 complex term is the surface of `A ∪ B`, not of every atom in the file. Ions,

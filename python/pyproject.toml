@@ -22,8 +22,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Optional cross-check for the geometry utilities (Biopython's Shrake-Rupley SASA
-# is used as an independent reference in the test-suite when it is present).
+# Biopython provides the reference Shrake-Rupley surface area. The metrics
+# module can use it directly (implementation="biopython"), and the test-suite
+# uses it to cross-check the vectorised PyTorch calculation.
 bio = ["biopython>=1.81"]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
