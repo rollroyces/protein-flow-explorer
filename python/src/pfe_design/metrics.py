@@ -246,8 +246,8 @@ def evaluate_complex(
         1 for the residues that form the interface, ``(N,)``.
     receptor_mask:
         The atoms used for the superposition.  Without it the fit uses
-        everything that is not the interface, which for a complex with a
-        ligand includes the ligand.
+        everything that is not the interface - and, when a ligand is given,
+        not the ligand either, so that the ligand cannot follow itself.
     ligand_mask:
         1 for the ligand's atoms; needed for the ligand RMSD.
     group_a, group_b:
@@ -271,20 +271,21 @@ def evaluate_complex(
         )
     cfg = cfg or MetricConfig()
 
-    irmsd_value = interface_rmsd(mobile, target, interface_mask, receptor_mask=receptor_mask)
+    # The ligand is carried by the receptor's fit; it must not be part of
+    # that fit, or it would follow itself and report a perfect score. Both
+    # measurements use the same fit.
+    fit = receptor_mask
+    if fit is None and ligand_mask is not None:
+        fit = ~(
+            _as_batch(interface_mask, 1, mobile.shape[0])[0]
+            | _as_batch(ligand_mask, 1, mobile.shape[0])[0]
+        )
+
+    irmsd_value = interface_rmsd(mobile, target, interface_mask, receptor_mask=fit)
     irmsd = float(irmsd_value) if bool(torch.isfinite(irmsd_value).all()) else None
 
     ligand_value: float | None = None
     if ligand_mask is not None:
-        fit = receptor_mask
-        if fit is None:
-            # Without an explicit receptor, the fit uses everything that is
-            # neither the interface nor the ligand - the ligand must not be
-            # part of the fit it is measured against.
-            fit = ~(
-                _as_batch(interface_mask, 1, mobile.shape[0])[0]
-                | _as_batch(ligand_mask, 1, mobile.shape[0])[0]
-            )
         measured = ligand_rmsd(mobile, target, fit, ligand_mask)
         ligand_value = float(measured) if bool(torch.isfinite(measured).all()) else None
 
@@ -303,6 +304,18 @@ def evaluate_complex(
         clash_penalty=report.penalty,
         max_overlap=report.max_overlap,
     )
+
+
+def _as_indices(group) -> Tensor:
+    """Accept a group either as a list of indices or as a boolean mask.
+
+    A boolean mask is a list of atoms, not a list of indices: reading it as
+    indices would turn ``True`` into the atom 1 and mangle every grouping.
+    """
+    indices = torch.as_tensor(group)
+    if indices.dtype == torch.bool:
+        indices = torch.nonzero(indices, as_tuple=False).reshape(-1)
+    return indices.to(torch.long).reshape(-1)
 
 
 def _as_batch(mask: Tensor, batch: int, n: int) -> Tensor:
@@ -655,10 +668,14 @@ def buried_surface_area(
     BSAResult
     """
     cfg = cfg or MetricConfig()
+    if implementation not in ("torch", "biopython"):
+        raise ValueError(
+            f"unknown implementation: {implementation!r}; use 'torch' or 'biopython'"
+        )
     complex_coords = complex_coords.to(torch.float64)
     complex_radii = complex_radii.to(torch.float64)
-    idx_a = torch.as_tensor(group_a, dtype=torch.long).reshape(-1)
-    idx_b = torch.as_tensor(group_b, dtype=torch.long).reshape(-1)
+    idx_a = _as_indices(group_a)
+    idx_b = _as_indices(group_b)
     if bool(torch.isin(idx_a, idx_b).any()):
         raise ValueError(
             "the two partner groups share atoms; a group cannot bury itself. "

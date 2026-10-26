@@ -16,7 +16,7 @@ import torch
 
 from pfe_design.conditioning import PocketConditioner, build_complex_mask
 from pfe_design.config import ModelConfig, TargetConditioningConfig
-from pfe_design.vector_field import BackboneVelocityField, rbf_features
+from pfe_design.vector_field import BackboneVelocityField, PairwiseBiasAttention, rbf_features
 
 FEATURE_DIM = 16
 HIDDEN_DIM = 32
@@ -337,3 +337,47 @@ def test_rbf_features_vanish_beyond_the_maximum_distance():
     distances = torch.full((1, 1), 500.0)
     encoded = rbf_features(distances, n_bins=16, max_distance=20.0)
     assert torch.count_nonzero(encoded).item() == 0
+
+
+def test_the_attention_layer_works_without_a_pair_mask():
+    """The pair mask is optional in the signature, so it has to be optional."""
+    attention = PairwiseBiasAttention(hidden_dim=8, n_heads=2, n_rbf_bins=4)
+    h = torch.randn(1, 3, 8)
+    features = rbf_features(torch.rand(1, 3, 3), 4, 20.0)
+
+    out = attention(h, features, None, None)
+
+    assert out.shape == (1, 3, 8)
+
+
+def test_a_float64_structure_goes_through_the_field():
+    """A float64 structure must not fail inside the network.
+
+    The conditioner was fixed to accept float64 coordinates; the network
+    takes the same coordinates, and the pair features are built from them,
+    so the fix has to reach all the way through.
+    """
+    torch.manual_seed(0)
+    model_cfg, cond_cfg = _configs(FEATURE_DIM)
+    field = BackboneVelocityField(model_cfg, cond_cfg)
+
+    target = (_target() * 2.0).to(torch.float64)
+    design = torch.randn(1, 3, 3, dtype=torch.float64)
+    mask = build_complex_mask(4, 3, batch_size=1)
+    valid = torch.ones(1, 4, dtype=torch.float64)
+    cond = PocketConditioner(cond_cfg, model_cfg)(target, valid, mask)
+    coords = torch.cat([target, design], dim=1)
+
+    velocity = field(coords, None, cond)
+
+    assert velocity.shape == (1, 7, 3)
+    assert bool(torch.isfinite(velocity).all())
+
+
+def test_the_pair_features_keep_the_dtype_that_was_asked_for():
+    """A float64 distance tensor must not drag the basis to float64."""
+    distances = torch.rand(2, 3, dtype=torch.float64) * 10.0
+
+    features = rbf_features(distances, 4, 20.0, dtype=torch.float32)
+
+    assert features.dtype == torch.float32

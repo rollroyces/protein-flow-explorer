@@ -530,25 +530,24 @@ class SideChainPackingHook(nn.Module):
                 packed = packed.to(torch.float64)
                 reason = _reject_reason(packed, request)
                 if reason is None:
+                    # The target is rigid: whatever the backend did to it is
+                    # put back BEFORE the result is scored, so the decision
+                    # is made on the coordinates that would actually be
+                    # returned.
+                    if self.cfg.keep_fixed_residues:
+                        packed = _restore_fixed(packed, request)
                     packed_penalty = clash_report(packed, metric_cfg).penalty
                     backend_used = self.backend.name
                     if (not self.cfg.reject_worse) or packed_penalty <= final_penalty:
-                        # The target is rigid: whatever the backend did to it
-                        # is put back, so the guarantee the caller sees is the
-                        # same one the refinement honoured.
-                        final = (
-                            _restore_fixed(packed, request)
-                            if self.cfg.keep_fixed_residues
-                            else packed
-                        )
-                        final_penalty = clash_report(final, metric_cfg).penalty
+                        final = packed
+                        final_penalty = packed_penalty
                         accepted = True
                 else:
                     # A backend that returns something unusable - a diverged
                     # minimisation, a NaN coordinate - must not be scored as
                     # a perfect zero and accepted. It is discarded, and the
-                    # reason is recorded.
-                    backend_used = self.backend.name
+                    # reason is recorded. `backend_used` stays None: nothing
+                    # of this backend's output was kept.
                     rejection = reason
 
         return PackingResult(

@@ -53,6 +53,10 @@ def rbf_features(
         Number of basis functions.
     max_distance:
         Distance covered by the last basis function (Angstrom).
+    dtype:
+        The dtype of the result.  It is honoured: a float64 distance tensor
+        would otherwise promote the basis to float64 and take the layer's
+        float32 weights with it.
 
     Returns
     -------
@@ -62,7 +66,7 @@ def rbf_features(
     dtype = dtype or distances.dtype
     mu = torch.linspace(0.0, max_distance, n_bins, device=distances.device, dtype=dtype)
     sigma = max_distance / max(1, n_bins - 1)
-    return torch.exp(-(((distances.unsqueeze(-1) - mu) / sigma) ** 2))
+    return torch.exp(-(((distances.to(dtype).unsqueeze(-1) - mu) / sigma) ** 2))
 
 
 class PairwiseBiasAttention(nn.Module):
@@ -133,7 +137,12 @@ class PairwiseBiasAttention(nn.Module):
             pair_value = pair_value * pair_mask.unsqueeze(-1).to(pair_value.dtype)
             counts = pair_mask.sum(dim=2).clamp(min=1).to(pair_value.dtype)
         else:
-            counts = float(n_res)
+            counts = torch.full(
+                (batch, n_res),
+                float(n_res),
+                dtype=pair_value.dtype,
+                device=pair_value.device,
+            )
         out = out + pair_value.sum(dim=2) / counts.unsqueeze(-1)
         return out
 

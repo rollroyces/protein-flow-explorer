@@ -330,10 +330,10 @@ class PocketConditioner(nn.Module):
                 "0 = fixed target); a fractional value is read as a weight by "
                 "one constraint and as a flag by the other"
             )
-        if not bool(target_valid.to(torch.bool).any()):
+        if not bool(target_valid.to(torch.bool).any(dim=1).all()):
             raise ValueError(
-                "the target has no modelled residue; there is nothing to "
-                "condition on"
+                "a target with no modelled residue has nothing to condition on; "
+                "the pocket would be an arbitrary point at the origin"
             )
 
         device = target_xyz.device

@@ -479,3 +479,14 @@ def test_detach_target_still_produces_a_usable_context():
     ctx_detached = detached(TARGET_COORDS, _valid(), _mask()).context
     ctx_attached = attached(TARGET_COORDS, _valid(), _mask()).context
     assert torch.allclose(ctx_detached, ctx_attached, atol=1e-6)
+
+
+def test_one_structure_of_a_batch_with_no_modelled_target_is_refused():
+    """The check is per structure, not per batch."""
+    target = torch.randn(2, 4, 3)
+    valid = torch.ones(2, 4)
+    valid[0] = 0.0
+    mask = build_complex_mask(4, 3, batch_size=2)
+
+    with pytest.raises(ValueError, match="no modelled residue"):
+        PocketConditioner()(target, valid, mask)

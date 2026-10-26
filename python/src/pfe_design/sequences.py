@@ -106,20 +106,26 @@ def residue_types_from_sequence(sequence: str, format: str = "auto") -> list[int
     and the modified residues in :data:`MODIFIED_AA3` are mapped onto the
     residue they are derived from.
 
-    The ``format`` argument says how to read the string:
+    The string is split into parts on whitespace and commas.  The
+    ``format`` argument says how a part is read:
 
     ``"auto"`` (the default)
-        A string with more than one whitespace-separated part is read as
-        three-letter codes; a single part is read as one letter per
-        residue.  The rule is not cosmetic: every three-letter code is also
-        a valid run of three one-letter codes, so ``"MET"`` is ambiguous,
-        and reading it one way would silently change the length of the
-        sequence - which is the sequence a structure predictor is given.
+        A string with more than one part is read as three-letter codes; a
+        single part is read as one letter per residue.  The rule is not
+        cosmetic: every three-letter code is also a valid run of three
+        one-letter codes, so ``"MET"`` is ambiguous, and reading it the
+        wrong way would silently change the length of the sequence - which is
+        the sequence a structure predictor is given.
     ``"one-letter"``
-        One residue per character, always.
+        Every character of every part is a residue; separators are dropped.
     ``"three-letter"``
-        One residue per whitespace-separated part; a part that is not a known
-        code is read as one letter per character.
+        Each part is read as three-letter codes: the part itself if it is a
+        known code, otherwise it is cut into known codes, otherwise it is
+        read as one letter per character.
+
+    The "auto" rule is applied per part, so a string whose parts disagree
+    (``"MSEALA METAL"``) is read one way in one part and the other way in
+    the next.  Say what you mean with ``format=``.
     """
     indices: list[int] = []
     for token in _tokenise(sequence.strip(), format):

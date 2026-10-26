@@ -650,3 +650,81 @@ def test_a_backend_cannot_move_the_fixed_residues():
 
     assert result.accepted_backend is True
     assert torch.equal(result.coordinates[0], coords[0])
+
+
+def test_the_result_is_scored_on_the_coordinates_that_are_returned():
+    """The accept/reject decision must be made on the returned structure.
+
+    The target is restored before the result is scored, so a backend that
+    moved the target cannot be accepted on a penalty that belonged to the
+    pre-restore coordinates.
+    """
+    import torch
+
+    from pfe_design.metrics import clash_report
+    from pfe_design.packing import PackingBackendBase
+
+    class DriftingBackend(PackingBackendBase):
+        """Clash-free as it stands, worse once the target is put back.
+
+        It moves the fixed residue far away and parks a free residue on top
+        of where the target belongs, so its own structure has no clashes at
+        all - but restoring the rigid target creates one.
+        """
+
+        name = "drifting"
+
+        @classmethod
+        def available(cls) -> bool:
+            return True
+
+        def pack(self, request):
+            moved = request.backbone_xyz.clone()
+            moved[0] = torch.tensor([0.0, 0.0, 50.0], dtype=torch.float64)
+            moved[1] = torch.tensor([0.0, 0.0, 0.5], dtype=torch.float64)
+            return moved
+
+    coords = torch.tensor(
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 3.0], [0.0, 0.0, 6.0]], dtype=torch.float64
+    )
+    fixed = torch.tensor([True, False, True])
+    hook = SideChainPackingHook(PackingConfig(), backend=DriftingBackend())
+    request = hook.prepare(coords, torch.zeros(3, dtype=torch.long), fixed)
+
+    result = hook(request)
+
+    # The reported penalty is the penalty of the structure that was returned.
+    reported = clash_report(result.coordinates, MetricConfig(clash_distance=2.0)).penalty
+    assert result.clash_penalty == pytest.approx(reported, rel=1e-9)
+    # And the fixed residue is still where it started.
+    assert torch.equal(result.coordinates[0], coords[0])
+    # The backend's structure is worse once the target is restored, so it is
+    # not accepted.
+    assert result.accepted_backend is False
+
+
+def test_a_rejected_backend_is_not_reported_as_used():
+    """A discarded result is not a result the backend produced."""
+    import torch
+
+    from pfe_design.packing import PackingBackendBase
+
+    class NanBackend(PackingBackendBase):
+        name = "nan"
+
+        @classmethod
+        def available(cls) -> bool:
+            return True
+
+        def pack(self, request):
+            return torch.full_like(request.backbone_xyz, float("nan"))
+
+    coords = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.9]], dtype=torch.float64)
+    hook = SideChainPackingHook(PackingConfig(), backend=NanBackend())
+    request = hook.prepare(coords, torch.zeros(2, dtype=torch.long))
+
+    result = hook(request)
+
+    assert result.accepted_backend is False
+    assert result.backend_used is None
+    assert result.rejection is not None

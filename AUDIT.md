@@ -1116,7 +1116,7 @@ The package was handed to a verifier with instructions to break it: a hostile
 velocity model, adversarial masks, in-memory mutations of the guarantees,
 closed-form checks of the metrics, and a re-measurement of every claim in
 this document. Eight defects came back, and all eight are now fixed and
-pinned by regression tests (`python/tests/test_regressions.py`, 13 tests):
+pinned by regression tests (`python/tests/test_regressions.py`):
 
 | Defect | What it did | Fix |
 |---|---|---|
@@ -1176,6 +1176,27 @@ isolated from the conditioning.
 Every defect claimed fixed in this document now has a test that fails when
 the defect is restored. That is the standard the claims below are held to.
 
+A third review round, against the code written to fix the second round, found
+nine more. Two of them were new defects introduced by that round itself,
+which is worth recording plainly:
+
+| Defect | What it did | Fix |
+|---|---|---|
+| The restore ran after the decision | the packing hook scored the backend's coordinates, then restored the fixed residues and returned a different structure - so the accept/reject decision was made on coordinates that were thrown away, and the hook could return something worse than it rejected | the fixed residues are restored first, and the result is scored on the coordinates that are actually returned |
+| An optional argument crashed | the attention layer's pair mask is optional in its signature, but passing it as `None` raised | the counts are a tensor in both branches |
+| The float64 fix stopped one layer up | the conditioner accepted float64 coordinates, but the network then built its pair features in float64 and failed on its own float32 weights | the pair features keep the dtype they are asked for, and a float64 structure now goes through the whole network |
+| The documented sequence rule did not match the code | it said "whitespace-separated" where the code also split on commas, and described a fallback the code did not implement | the docstring now describes what the code does, part by part |
+| Boolean group masks were read as index lists | `True` became the atom 1, and the new overlap refusal then refused disjoint groups | a boolean mask is converted to the atoms it names |
+| A discarded backend was reported as used | `backend_used` named a backend whose output had been thrown away | it stays `None` when nothing was kept |
+| The ligand still tilted the interface fit | the facade stopped the ligand joining the *ligand* RMSD's fit, but the interface RMSD still used a fit that contained the ligand | both measurements use the same ligand-free fit |
+| A typo fell back silently | `implementation="biopythn"` used the torch path without a word | the implementation name is validated |
+| The empty-target refusal was per batch | one structure of a batch could be conditioned on with nothing modelled, and got an arbitrary pocket at the origin | the check is per structure |
+
+The review's judgement on that round was a fail, on the strength of the two
+new defects it had introduced. They are fixed, and the "every defect has a
+test that fails when it is restored" claim above is now backed by eleven
+mutations run against the suite, each of which fails it.
+
 ### 12.9 What this is not
 
 Stated plainly, so it is not over-read:
@@ -1216,20 +1237,20 @@ Everything in this document was checked, not assumed.
 | Slice bound | Yield counting across EGFR / 4HHB / 6VXX | ~12 ms worst block in all three |
 | Network semantics | `test/net.test.js`, real `net()` vs stubbed `fetch` | 6/6 behaviours correct |
 | DOM bindings intact | All 116 `$(...)` ids cross-checked against `index.html` | 116/116 present, 0 missing |
-| Lint baseline | ESLint 9, correctness rules, `app.js` + `src/` + `data/` | 0 errors, 34 warnings, 0 genuine undefined refs |
+| Lint baseline | ESLint 9, correctness rules, `app.js` + `src/` + `data/` | 0 errors, 0 warnings |
 | Live page load | Real browser, local server | 0 console errors, 13 proteins rendered, 3Dmol initialised, modules callable |
 | Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
 | Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
-| Design package suite | `python -m pytest` (9 files) | **279 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 41 packing + 22 evaluation + 18 regression + 10 Biopython cross-check) |
+| Design package suite | `python -m pytest` (9 files) | **290 tests, 0 failed** (32 config + 45 conditioning + 24 vector field + 42 integration + 49 metrics + 43 packing + 26 evaluation + 18 regression + 11 Biopython cross-check) |
 | Masking guarantees | Fixed residues after Euler, Heun and SDE integration, with a model that deliberately returns a velocity of 1e4 on the target | 0 fixed-residue velocity, 0 fixed-residue displacement, coordinates bit-identical (`torch.equal`) |
 | The masking tests have teeth | In-memory mutation: remove the velocity mask | the suite fails (9 tests). Removing the write-back changes no number, because a zero velocity is already a zero displacement - recorded in §12.3 as a correction rather than claimed as a second guarantee |
-| Every defect-pinning test can fail | The defect restored in memory, one at a time: the stochastic Heun diffusion, the batch-global pocket fallback, the wrong radii slice, the unmasked pair value, the chunked SASA, the whole-complex BSA | each mutation fails the suite; the three tests that could not fail have been repaired |
+| Every defect-pinning test can fail | Eleven defects restored in memory, one at a time: the velocity mask, the stochastic Heun diffusion, the batch-global pocket fallback, the wrong radii slice, the unmasked pair value, the chunked SASA, the whole-complex BSA, the restore-after-the-decision, the float neighbour count, the ignored pair-feature dtype, and the write-back | ten of the eleven fail the suite. The eleventh is the write-back, and its not being caught is the point of §12.3: a zero velocity is already a zero displacement, so the write-back is defence in depth rather than a second guarantee, and the document says so instead of claiming otherwise |
 | Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | two rounds: 8 defects then 6 more, all fixed, with the vacuous tests found and repaired; several claims in this document corrected |
-| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and on a buried area the two agree to 0.9-1.3 % on the cases in the suite |
+| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error. The reference implementation is also reachable from the metrics module (`sasa_biopython`, `implementation="biopython"`), and on a buried area they differ by 0.1-13 % over a 48-system sample (median 1.1 %), the difference being spherical sampling noise amplified by the subtraction |
 | Design package lint | `ruff check python` (`E,F,W,I,UP,B`) | 0 errors |
 | The static site is unaffected | `npm test` and `npm run check` after adding the package | 1,316 assertions, 0 failed; 21 syntax checks clean — unchanged |
-| Deployment | GitHub Actions on push to `main` | green |
+| Deployment | GitHub Actions on push to `main` | the site's own deployment is green; the design package's CI job has not run, because these commits are not pushed |
 
 ---
 

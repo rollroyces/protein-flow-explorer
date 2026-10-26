@@ -193,9 +193,12 @@ bsa = buried_surface_area(coords, radii, group_a, group_b,
                           implementation="biopython", elements=elements)
 ```
 
-On a buried area the two agree to 0.9-1.3 % — the difference is spherical
-sampling noise, and it shrinks as the sampling is refined, which is how you
-tell sampling noise apart from a systematic error. The cross-check in the test
+On a buried area the two differ by 0.1–13 % over a 48-system sample, with a
+median near 1 % — a buried area is a difference between two large surface
+areas, so the sampling error is amplified. What matters is that the
+difference *shrinks* as the sampling is refined, which is how you tell
+sampling noise apart from a systematic error; the test-suite asserts that
+property rather than a fixed tolerance. The cross-check in the test
 -suite makes that argument explicitly, at two system sizes.
 
 The buried area is the burial of the two partners *against each other*: the

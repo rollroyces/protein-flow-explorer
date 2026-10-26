@@ -290,3 +290,67 @@ def test_the_ligand_is_never_part_of_its_own_fit():
 
     assert implicit.ligand_rmsd == pytest.approx(3.0, rel=1e-6)
     assert explicit.ligand_rmsd == pytest.approx(3.0, rel=1e-6)
+
+
+def test_boolean_group_masks_are_read_as_atom_lists():
+    """A boolean mask is a list of atoms, not a list of indices."""
+    generator = torch.Generator().manual_seed(3)
+    coords = torch.randn((6, 3), generator=generator, dtype=torch.float64) * 3.0
+    radii = torch.full((6,), 1.70, dtype=torch.float64)
+    group_a = torch.tensor([True, True, False, False, False, False])
+    group_b = torch.tensor([False, False, True, False, False, False])
+
+    from pfe_design.metrics import buried_surface_area
+
+    result = buried_surface_area(coords, radii, group_a, group_b)
+
+    assert result.bsa >= 0.0
+
+
+def test_overlapping_boolean_masks_are_still_refused():
+    """The overlap check works on masks as well as on index lists."""
+    generator = torch.Generator().manual_seed(3)
+    coords = torch.randn((6, 3), generator=generator, dtype=torch.float64) * 3.0
+    radii = torch.full((6,), 1.70, dtype=torch.float64)
+    group_a = torch.tensor([True, True, False, False, False, False])
+    overlapping = torch.tensor([True, False, True, False, False, False])
+
+    from pfe_design.metrics import buried_surface_area
+
+    with pytest.raises(ValueError, match="cannot bury itself"):
+        buried_surface_area(coords, radii, group_a, overlapping)
+
+
+def test_an_unknown_implementation_is_refused():
+    """A typo must not fall back silently to the other implementation."""
+    generator = torch.Generator().manual_seed(3)
+    coords = torch.randn((6, 3), generator=generator, dtype=torch.float64) * 3.0
+    radii = torch.full((6,), 1.70, dtype=torch.float64)
+
+    from pfe_design.metrics import buried_surface_area
+
+    with pytest.raises(ValueError, match="unknown implementation"):
+        buried_surface_area(
+            coords,
+            radii,
+            torch.arange(3),
+            torch.arange(3, 6),
+            implementation="biopythn",
+        )
+
+
+def test_the_ligand_does_not_tilt_the_interface_fit_either():
+    """The interface RMSD uses the same ligand-free fit as the ligand RMSD."""
+    generator = torch.Generator().manual_seed(9)
+    target = torch.randn((34, 3), generator=generator, dtype=torch.float64) * 5.0
+    interface = torch.zeros(34, dtype=torch.bool)
+    interface[20:28] = True
+    ligand = torch.zeros(34, dtype=torch.bool)
+    ligand[28:] = True
+    moved = target.clone()
+    moved[28:] += torch.tensor([0.0, 0.0, 5.0], dtype=torch.float64)
+
+    result = evaluate_complex(moved, target, interface, ligand_mask=ligand)
+
+    assert result.irmsd == pytest.approx(0.0, abs=1e-6)
+    assert result.ligand_rmsd == pytest.approx(5.0, rel=1e-6)
