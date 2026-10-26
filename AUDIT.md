@@ -972,7 +972,162 @@ score down.
 
 ---
 
-## 12. Verification
+## 12. Addendum — target-conditioned design, the modelling half
+
+The viewer reads structures; it cannot design anything. This addendum records
+the first part of the other half: a package that conditions a flow-matching
+backbone field on a chosen pocket of a target protein, integrates the
+trajectory with the target held rigid, measures the complex, and prepares it
+for side-chain packing.
+
+### 12.1 A correction to the brief
+
+The brief described `protein-flow-explorer` as "a PyTorch/JAX-based protein
+flow matching repository" whose vector field network should be *updated*. It
+is not. It was, and remains, a zero-build vanilla-JS static site with no
+Python anywhere in it; the whole repository was searched for an existing
+PyTorch or flow-matching codebase and there is none on the machine.
+
+So there was nothing to update, and the honest reading of "implement
+target-specific pocket conditioning" is *build* it. That is what was done, in
+`python/`, as a self-contained package that does not touch the site: the
+static site still has no build step and no runtime dependency, and the Python
+package is tested by its own CI job.
+
+### 12.2 The mask convention
+
+Everything hangs off one convention, stated once and enforced in code. The
+complex is a single coordinate tensor `(B, N, 3)`; the target occupies the
+first `Nt` positions and the designed region follows. `M` is the **dynamic**
+mask: `M[i] == 1` marks a residue free to move, `M[i] == 0` marks a fixed
+target residue.
+
+The conditioner rejects a mask whose target columns are not all zero, because
+a target residue that is allowed to move is a silent corruption of every
+downstream number, and it is much cheaper to reject it than to notice later.
+
+### 12.3 Two mechanisms, and what each one is actually worth
+
+The brief asks for "zero velocity/update constraints on masked target
+residues". There are two mechanisms, and it is worth being exact about what
+each one buys, because an independent review of this section found that the
+first draft of it overclaimed:
+
+1. **Zero velocity** - the predicted velocity is multiplied by the dynamic
+   mask before it is used. This is the mechanism that does the work: a fixed
+   residue receives exactly zero velocity, so its coordinate cannot change
+   through the update.
+2. **Zero update** - after every step the fixed residues are written back to
+   their original coordinates. This is a projection, and it is what makes the
+   fixed coordinates *bit-identical* to the start rather than merely equal
+   to within the arithmetic of the update.
+
+They are not independent in the way the first draft claimed. Removing the
+write-back changes no observable number, because a zero velocity is already
+a zero displacement - the mutation measurement in the verification table
+below records exactly that, and this paragraph is the correction rather
+than a footnote to it. The write-back is kept because it makes the
+guarantee independent of that identity holding: a different float format, a
+non-finite upstream velocity, or a future solver that updates the state some
+other way would all break the implication rather than the guarantee.
+
+What the review did find is that the *diagnostic* was dishonest.
+`max_fixed_velocity` was computed from the already-masked velocity, so it
+was zero by construction and could never report a violation - it could not
+tell a caller anything. It now reports the raw velocity the model wanted on
+the fixed residues (`max_raw_fixed_velocity`), which can be large, while
+`max_fixed_velocity` reports what was actually applied. The test-suite
+asserts that the fixed residues come out **bit-identical** (`torch.equal`,
+not `allclose`) even when the model deliberately returns a velocity of 1e4
+on the target.
+
+The mask itself is now checked rather than assumed: a fractional value
+would be read as a *weight* by the velocity mask and as a *flag* by the
+coordinate write-back, and the two readings disagree - a residue with a
+mask of 0.5 would receive half a velocity and then be snapped back to a
+coordinate it never had. Both the conditioner and the integrator refuse a
+non-binary mask.
+
+### 12.4 Definitions that hide errors if chosen carelessly
+
+| Metric | Definition chosen | The trap it avoids |
+|---|---|---|
+| iRMSD | superpose on the **receptor**, score over the interface only | superposing on the interface hides receptor motion and reports a good score for a badly placed binder. The receptor has to be named explicitly when the complex also holds a ligand, or the fit silently includes the ligand's own atoms and tilts with it |
+| Ligand RMSD | the ligand is **carried by** the receptor fit, not fitted itself | fitting the ligand separately hides exactly the error being measured |
+| BSA | Shrake-Rupley, `SASA(free A) + SASA(free B) - SASA(A ∪ B)` | the complex term is the surface of the **two partners together**: summing over every atom in the file includes ions and a third chain, and in the limit makes the "buried area" negative, which is not a physical quantity |
+| Steric clash | inter-atomic distance below a threshold, **same-residue pairs excluded** | counting every covalent bond as a clash - a C-N bond is 1.33 Å, shorter than any sensible threshold, so every residue would "clash" |
+
+The superposition helpers return the rotation and the translation as well as
+the aligned coordinates, so a ligand can be moved by the same transform as
+the receptor.
+
+### 12.5 The packing hook is a seam, not a stub
+
+The hook is split into `prepare` / `refine` / `forward`. The built-in
+refinement pushes overlapping atoms apart while the fixed target residues stay
+bit-identical. PyRosetta, OpenMM and ESMFold are integrated as backends that
+declare whether they are installed and accept an injected callable, so a
+site-specific installation can be dropped in without touching the package; a
+backend that returns something worse than it was given is rejected rather than
+accepted silently.
+
+### 12.6 The defects this exposed
+
+Written down because the first two would have produced numbers that looked
+fine:
+
+* The validity mask was built by multiplying a complex-width tensor by a
+  target-width tensor, which threw on the first real call rather than
+  silently producing a wrong mask - a lucky failure.
+* A pocket centre supplied as `(3,)` was rejected instead of broadcast, which
+  would have made the obvious call fail.
+* The pair-conditioned value term aggregated over the radial-basis axis
+  instead of the neighbour axis, so the pair features were broadcast against
+  the wrong dimension.
+
+### 12.7 What an independent review found
+
+The package was handed to a verifier with instructions to break it: a hostile
+velocity model, adversarial masks, in-memory mutations of the guarantees,
+closed-form checks of the metrics, and a re-measurement of every claim in
+this document. Eight defects came back, and all eight are now fixed and
+pinned by regression tests (`python/tests/test_regressions.py`, 13 tests):
+
+| Defect | What it did | Fix |
+|---|---|---|
+| A fractional mask value | read as a weight by one constraint and as a flag by the other, so a residue was snapped back to the origin | the mask must be binary; checked in the conditioner and again in the integrator |
+| Stochastic Heun | the diffusion term reached the predictor but never the update, so the "stochastic" solver was bit-identical to the deterministic one | the predictor and the corrector share one Brownian increment, and it enters the update |
+| `max_fixed_velocity` | computed from the already-masked velocity, so it was zero by construction and could never report a violation | it now reports what was applied, and `max_raw_fixed_velocity` reports what the model wanted |
+| The pocket fallback | a batch-global test, so one member of a batch could change another member's pocket | the fallback is applied per structure |
+| Buried surface area | summed the complex over every atom, including atoms outside the two partners, and could come out negative | the complex term is the surface of the two partners together |
+| Per-structure radii | broadcast against the wrong axis in a batch, counting some pairs twice | the radii are sliced per structure |
+| An unmodelled residue | changed the velocities of the modelled residues through the pair features | the pair features are masked by validity, not only the attention keys |
+| Two unchecked inputs | the integrator accepted a start of the wrong length, and a target that was somewhere else entirely | both are refused with a message that says why |
+
+The review also corrected two claims in this document: the mutation
+experiment described in §12.3, and the "two independent guarantees"
+framing it belongs to.
+
+### 12.8 What this is not
+
+Stated plainly, so it is not over-read:
+
+* The vector field is an **untrained reference implementation**. It is a real
+  network with pair-biased attention and a conditioning path, and it is
+  sized so the mask guarantees can be tested exactly, but it has not learned
+  anything. There is no training loop here.
+* The pocket is geometric, not a learned binding site: it is the set of
+  target residues lining the site the user points at.
+* No PDB-to-complex assembly is included; the package starts from coordinates.
+* PyRosetta, OpenMM and ESMFold are not installed here, so their backends
+  raise a clear error rather than pretending to work.
+* The surface-area calculation costs O(N^2 x points) - fine for validating a
+  finished complex, too slow for a per-step training loop on a large one. A
+  neighbour list is the fix, and it is not written.
+
+---
+
+## 13. Verification
 
 Everything in this document was checked, not assumed.
 
@@ -991,6 +1146,13 @@ Everything in this document was checked, not assumed.
 | Drug panel, every library structure | Real browser, all 13 entries: load → detect pockets → fetch profile | 0 console errors; 6/6 cross-validation on 1M17, 6OIM, 1HVR and 2DN2; honest "not in a pocket" on the surface ions |
 | Pocket conservation | Real MSAs: ERBB, KRAS, globin, lysozyme, p53, adenylate-kinase families | the ligand's cavity is the most conserved cavity in each structure; EGFR's 15 ligand-binding residues 87 % conserved against a 79 % baseline |
 | Library structures vs the PDB | Each entry's PDB title and HETATM set fetched from RCSB | 2 wrong references found and corrected (5VQ2 → 6OIM, 2PC1 → 3IXO) |
+| Design package suite | `python -m pytest` (8 files) | **244 tests, 0 failed** (32 config + 44 conditioning + 21 vector field + 42 integration + 49 metrics + 38 packing + 13 regression + 5 Biopython cross-check) |
+| Masking guarantees | Fixed residues after Euler, Heun and SDE integration, with a model that deliberately returns a velocity of 1e4 on the target | 0 fixed-residue velocity, 0 fixed-residue displacement, coordinates bit-identical (`torch.equal`) |
+| The masking tests have teeth | In-memory mutation: remove the velocity mask | the suite fails (9 tests). Removing the write-back changes no number, because a zero velocity is already a zero displacement - recorded in §12.3 as a correction rather than claimed as a second guarantee |
+| Independent review | Adversarial verifier: hostile velocity model, adversarial masks, in-memory mutations, closed-form metric checks, every doc claim re-measured | 8 defects found, 8 fixed, 13 regression tests added; two claims in this document corrected (§12.3, and the mutation row above) |
+| Surface-area implementation | PyTorch Shrake-Rupley against Biopython's `Bio.PDB.SASA` on the same coordinates | totals agree to 0.6 %; the RMS per-atom error falls 0.31 % → 0.023 % as the sampling refines, which is the signature of sampling noise rather than a systematic error |
+| Design package lint | `ruff check python` (`E,F,W,I,UP,B`) | 0 errors |
+| The static site is unaffected | `npm test` and `npm run check` after adding the package | 1,316 assertions, 0 failed; 21 syntax checks clean — unchanged |
 | Deployment | GitHub Actions on push to `main` | green |
 
 ---

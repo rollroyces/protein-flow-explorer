@@ -99,3 +99,42 @@ jobs:
         run: npx --yes audit-ci@latest --package-manager npm --omit=dev || true
         env:
           AUDIT_LEVEL: moderate
+
+  # The design package (target-pocket conditioning, the constrained
+  # integrator, the geometry metrics and the packing hook) is Python, and is
+  # tested separately from the static site. The site itself is unchanged and
+  # still has no build step.
+  python-design:
+    name: Design package (conditioning, metrics, packing)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # CPU-only torch: the CI machine has no GPU and the CUDA wheels are
+      # several gigabytes. Installing torch first means the package install
+      # below finds the requirement already satisfied.
+      #
+      # The "bio" extra pulls in Biopython, which the suite uses to cross-check
+      # the surface-area implementation against an independent one. Without it
+      # that cross-check is skipped and the headline agreement number would be
+      # a local-only claim.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e "python[dev,bio]"
+
+      # The suite covers the masking logic (zero velocity and zero update on
+      # fixed target residues) and the geometry metrics (iRMSD, ligand RMSD,
+      # buried surface area, steric clashes).
+      - name: Design package tests
+        run: python -m pytest python/tests -v
+
+      # Lint. The configuration lives in python/pyproject.toml, so this adds no
+      # dependency beyond the dev extra.
+      - name: Design package lint
+        run: python -m ruff check python

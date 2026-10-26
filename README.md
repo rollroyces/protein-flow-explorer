@@ -121,9 +121,11 @@ Load anything else by PDB ID, gene symbol, UniProt accession, or by dropping a
 
 ```bash
 python3 -m http.server 8765   # then open http://localhost:8765
-npm test                      # 770 assertions across 8 suites
+npm test                      # 1,316 assertions across 10 suites
 npm run check                 # syntax-check every JS file
 npx eslint@9 .                # lint (the config is in the repo, no dependency)
+
+cd python && python -m pytest # the design package's own suite
 ```
 
 No build step, no dependencies. Vanilla HTML/CSS/JS + 3Dmol.js.
@@ -140,6 +142,47 @@ app actually renders). They load as plain scripts and publish themselves on
 the `PFE` namespace, so they can be `require()`d and unit-tested with no DOM
 stub at all. See [AUDIT.md](AUDIT.md) for the architecture review that
 motivated the split.
+
+## Design package
+
+The site reads structures; it cannot design anything. `python/` is the other
+half — a PyTorch package that conditions a flow-matching backbone field on a
+chosen pocket of a target protein, integrates the trajectory with the target
+held rigid, measures the complex, and prepares it for side-chain packing.
+
+It is a separate package with its own `pyproject.toml`, its own pytest suite
+and its own CI job. The site above is unchanged by it: still no build step,
+still no runtime dependency.
+
+```python
+from pfe_design import (
+    build_complex_mask,
+    PocketConditioner, TargetConditioningConfig,
+    BackboneVelocityField, ModelConfig,
+    FlowIntegrationConfig, integrate,
+    interface_rmsd, buried_surface_area, clash_report,
+    SideChainPackingHook,
+)
+
+M = build_complex_mask(n_target=312, n_design=64)   # 1 = dynamic (designed)
+cond = PocketConditioner(TargetConditioningConfig())(
+    target_xyz=target_backbone, target_valid=target_valid,
+    dynamic_mask=M, pocket_center=site,
+)
+result = integrate(x0, model, cond, FlowIntegrationConfig(n_steps=100))
+assert result.max_fixed_velocity == 0.0        # the target never moves
+```
+
+The design region is steered by a binary mask `M` over the complex, and the
+fixed target residues are held by two mechanisms: their velocity is zeroed, and
+their coordinates are written back after every integration step, so the target
+cannot drift away from where it started. The pocket centre is exactly what the
+site's pocket detector reports, so a cavity found in the viewer can be handed
+straight to the design package. The vector field is an untrained reference
+implementation — the point of the package is the conditioning contract and the
+measurement, not a trained model. See [python/README.md](python/README.md) for
+the details and [AUDIT.md § 12](AUDIT.md) for the reasoning behind each metric
+definition, including what an adversarial review found and what it cost.
 
 ## Notes on method
 

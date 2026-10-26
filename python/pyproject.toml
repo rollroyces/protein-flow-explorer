@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pfe-design"
+version = "0.1.0"
+description = "Target-specific pocket conditioning and geometry evaluation for protein design"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Royce", email = "roycelam@umich.edu" }]
+keywords = ["protein-design", "flow-matching", "binder", "docking", "interface"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "torch>=2.1",
+  "numpy>=1.24",
+  "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+# Optional cross-check for the geometry utilities (Biopython's Shrake-Rupley SASA
+# is used as an independent reference in the test-suite when it is present).
+bio = ["biopython>=1.81"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# The package is importable without installation, so the suite runs straight
+# from a checkout with `python -m pytest`.
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]

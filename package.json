@@ -7,6 +7,8 @@
   "scripts": {
     "serve": "python3 -m http.server 8765",
     "test": "node test/analysis.test.js && node test/expression.test.js && node test/validate.test.js && node test/annotations.test.js && node test/variants.test.js && node test/colors.test.js && node test/bio.test.js && node test/drug.test.js && node test/pockets.test.js && node test/net.test.js",
+    "test:python": "cd python && python3 -m pytest",
+    "lint:python": "cd python && python3 -m ruff check .",
     "check": "node --check app.js && node --check data/proteins.js && node --check src/seq.js && node --check src/geometry.js && node --check src/pockets.js && node --check src/colors.js && node --check src/variants.js && node --check src/expression.js && node --check src/validate.js && node --check src/annotations.js && node --check src/drug.js && node --check test/analysis.test.js && node --check test/expression.test.js && node --check test/validate.test.js && node --check test/annotations.test.js && node --check test/variants.test.js && node --check test/colors.test.js && node --check test/bio.test.js && node --check test/drug.test.js && node --check test/pockets.test.js && node --check test/net.test.js"
   },
   "devDependencies": {}
